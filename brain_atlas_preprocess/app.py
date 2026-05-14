@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QProgressBar,
+    QSpinBox,
     QSplitter,
     QStatusBar,
     QVBoxLayout,
@@ -26,7 +27,7 @@ from PySide6.QtWidgets import (
 
 from brain_atlas_preprocess.io import (
     StackFormatError,
-    export_rotated_channels,
+    export_preprocessed_channels,
     load_dapi_mip,
     make_file_state,
 )
@@ -55,10 +56,16 @@ class PreprocessWorker(QObject):
     finished = Signal(list)
     failed = Signal(str)
 
-    def __init__(self, files: list[StackFileState], output_root: str) -> None:
+    def __init__(
+        self,
+        files: list[StackFileState],
+        output_root: str,
+        crop_size_px: int,
+    ) -> None:
         super().__init__()
         self.files = files
         self.output_root = output_root
+        self.crop_size_px = crop_size_px
 
     @Slot()
     def run(self) -> None:
@@ -67,11 +74,12 @@ class PreprocessWorker(QObject):
             total = len(self.files)
             for index, file_state in enumerate(self.files, start=1):
                 self.progress.emit(index - 1, total, file_state.name)
-                output_dir = export_rotated_channels(
+                output_dir = export_preprocessed_channels(
                     file_state,
                     self.output_root,
                     interpolation="linear",
                     expand_canvas=True,
+                    crop_size_px=self.crop_size_px,
                 )
                 outputs.append(str(output_dir))
                 self.progress.emit(index, total, file_state.name)
@@ -100,9 +108,16 @@ class MainWindow(QMainWindow):
 
         self.preview = RotationPreview()
         self.preview.angleChanged.connect(self._angle_changed)
+        self.preview.cropCenterChanged.connect(self._crop_center_changed)
 
         self.output_label = QLabel("No output root selected")
         self.angle_label = QLabel("Angle: 0.00 deg")
+        self.crop_label = QLabel("Crop size")
+        self.crop_size_input = QSpinBox()
+        self.crop_size_input.setRange(1, 100000)
+        self.crop_size_input.setValue(self.project.crop_size_px)
+        self.crop_size_input.setSuffix(" px")
+        self.crop_size_input.valueChanged.connect(self._crop_size_changed)
         self.progress = QProgressBar()
         self.progress.setVisible(False)
 
@@ -141,6 +156,8 @@ class MainWindow(QMainWindow):
         right_controls.addWidget(reset)
         right_controls.addWidget(preprocess)
         right_controls.addStretch(1)
+        right_controls.addWidget(self.crop_label)
+        right_controls.addWidget(self.crop_size_input)
         right_controls.addWidget(self.angle_label)
 
         right = QWidget()
@@ -193,6 +210,8 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Could not open project", _format_error(exc))
             return
         self.preview_cache.clear()
+        self.crop_size_input.setValue(self.project.crop_size_px)
+        self.preview.set_crop_size(self.project.crop_size_px)
         self._refresh_file_list()
         self._update_output_label()
         if self.file_list.count():
@@ -215,6 +234,7 @@ class MainWindow(QMainWindow):
             self.current_file = None
             self.preview.set_image(None)
             self.preview.set_angle(0.0)
+            self.preview.set_crop_center(None)
             self.angle_label.setText("Angle: 0.00 deg")
             return
         path = current.data(Qt.ItemDataRole.UserRole)
@@ -222,6 +242,8 @@ class MainWindow(QMainWindow):
         if self.current_file is None:
             return
         self.preview.set_angle(self.current_file.rotation_degrees)
+        self.preview.set_crop_size(self.project.crop_size_px)
+        self.preview.set_crop_center(self.current_file.crop_center_yx)
         self.angle_label.setText(f"Angle: {self.current_file.rotation_degrees:.2f} deg")
         if path in self.preview_cache:
             self.preview.set_image(self.preview_cache[path])
@@ -275,6 +297,20 @@ class MainWindow(QMainWindow):
         self.file_list.refresh_file(self.current_file)
         self._save_project_if_possible()
 
+    def _crop_center_changed(self, center_yx: object) -> None:
+        if self.current_file is None:
+            return
+        y, x = center_yx
+        self.current_file.crop_center_yx = (int(y), int(x))
+        self.current_file.reviewed = True
+        self.file_list.refresh_file(self.current_file)
+        self._save_project_if_possible()
+
+    def _crop_size_changed(self, size_px: int) -> None:
+        self.project.crop_size_px = int(size_px)
+        self.preview.set_crop_size(size_px)
+        self._save_project_if_possible()
+
     def _reset_rotation(self) -> None:
         if self.current_file is None:
             return
@@ -316,7 +352,11 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.progress.setValue(0)
         self.preprocess_thread = QThread()
-        self.preprocess_worker = PreprocessWorker(list(self.project.files), self.project.output_root)
+        self.preprocess_worker = PreprocessWorker(
+            list(self.project.files),
+            self.project.output_root,
+            self.project.crop_size_px,
+        )
         self.preprocess_worker.moveToThread(self.preprocess_thread)
         self.preprocess_thread.started.connect(self.preprocess_worker.run)
         self.preprocess_worker.progress.connect(self._preprocess_progress)

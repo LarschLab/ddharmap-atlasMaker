@@ -190,12 +190,53 @@ def rotate_stack_zyx(
     return _preserve_dtype(rotated, stack.dtype)
 
 
-def export_rotated_channels(
+def crop_square_zyx(
+    stack: np.ndarray,
+    center_yx: tuple[int, int] | None,
+    size_px: int,
+) -> np.ndarray:
+    if stack.ndim != 3:
+        raise ValueError(f"Expected ZYX stack, got shape {stack.shape}.")
+    if size_px < 1:
+        raise ValueError(f"Crop size must be at least 1 pixel, got {size_px}.")
+
+    if center_yx is None:
+        center_y = stack.shape[1] // 2
+        center_x = stack.shape[2] // 2
+    else:
+        center_y, center_x = center_yx
+
+    start_y = int(center_y) - size_px // 2
+    start_x = int(center_x) - size_px // 2
+    end_y = start_y + size_px
+    end_x = start_x + size_px
+
+    source_start_y = max(0, start_y)
+    source_start_x = max(0, start_x)
+    source_end_y = min(stack.shape[1], end_y)
+    source_end_x = min(stack.shape[2], end_x)
+
+    cropped = np.zeros((stack.shape[0], size_px, size_px), dtype=stack.dtype)
+    if source_start_y >= source_end_y or source_start_x >= source_end_x:
+        return cropped
+
+    target_start_y = source_start_y - start_y
+    target_start_x = source_start_x - start_x
+    target_end_y = target_start_y + (source_end_y - source_start_y)
+    target_end_x = target_start_x + (source_end_x - source_start_x)
+    cropped[:, target_start_y:target_end_y, target_start_x:target_end_x] = stack[
+        :, source_start_y:source_end_y, source_start_x:source_end_x
+    ]
+    return cropped
+
+
+def export_preprocessed_channels(
     file_state: StackFileState,
     output_root: str | Path,
     *,
     interpolation: str = "linear",
     expand_canvas: bool = True,
+    crop_size_px: int = 750,
 ) -> Path:
     if interpolation not in SUPPORTED_INTERPOLATION:
         raise ValueError(f"Unsupported interpolation: {interpolation}")
@@ -216,17 +257,26 @@ def export_rotated_channels(
             interpolation=interpolation,
             expand_canvas=expand_canvas,
         )
+        cropped = crop_square_zyx(rotated, file_state.crop_center_yx, crop_size_px)
         out_name = (
             f"{source.stem}_{_safe_filename_part(channel.gene)}_"
-            f"{channel.wavelength_nm}nm_rotated.tif"
+            f"{channel.wavelength_nm}nm_preprocessed.nrrd"
         )
         out_path = output_dir / out_name
-        _write_stack_tiff(out_path, rotated, metadata)
+        _write_stack_nrrd(
+            out_path,
+            cropped,
+            metadata,
+            channel=channel,
+            rotation_degrees=file_state.rotation_degrees,
+            crop_center_yx=file_state.crop_center_yx,
+            crop_size_px=crop_size_px,
+        )
         output_files.append(
             {
                 "channel": channel.to_dict(),
                 "path": str(out_path),
-                "shape": list(rotated.shape),
+                "shape": list(cropped.shape),
             }
         )
 
@@ -235,11 +285,32 @@ def export_rotated_channels(
         "rotation_degrees": file_state.rotation_degrees,
         "interpolation": interpolation,
         "canvas_mode": "expand" if expand_canvas else "keep_original_size",
+        "crop_size_px": crop_size_px,
+        "crop_center_yx": (
+            list(file_state.crop_center_yx)
+            if file_state.crop_center_yx is not None
+            else None
+        ),
         "output_files": output_files,
     }
     manifest_path = output_dir / "preprocess_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return output_dir
+
+
+def export_rotated_channels(
+    file_state: StackFileState,
+    output_root: str | Path,
+    *,
+    interpolation: str = "linear",
+    expand_canvas: bool = True,
+) -> Path:
+    return export_preprocessed_channels(
+        file_state,
+        output_root,
+        interpolation=interpolation,
+        expand_canvas=expand_canvas,
+    )
 
 
 def _optional_float(value: Any) -> float | None:
@@ -285,6 +356,57 @@ def _write_stack_tiff(path: Path, stack: np.ndarray, metadata: StackMetadata) ->
         if x_um > 0 and y_um > 0:
             kwargs["resolution"] = (1 / x_um, 1 / y_um)
     tifffile.imwrite(path, stack, **kwargs)
+
+
+def _write_stack_nrrd(
+    path: Path,
+    stack: np.ndarray,
+    metadata: StackMetadata,
+    *,
+    channel: ChannelInfo,
+    rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+) -> None:
+    import nrrd
+
+    header: dict[str, Any] = {
+        "dimension": 3,
+        "kinds": ["domain", "domain", "domain"],
+        "encoding": "gzip",
+        "source_path": metadata.path,
+        "source_name": Path(metadata.path).name,
+        "source_axes": metadata.axes,
+        "source_shape": json.dumps(list(metadata.shape)),
+        "source_dtype": metadata.dtype,
+        "channel_index": channel.index,
+        "channel_gene": channel.gene,
+        "channel_wavelength_nm": channel.wavelength_nm,
+        "rotation_degrees": float(rotation_degrees),
+        "crop_size_px": int(crop_size_px),
+        "crop_center_yx": json.dumps(list(crop_center_yx) if crop_center_yx else None),
+    }
+    spacings_um = _voxel_spacings_um(metadata)
+    if spacings_um is not None:
+        header["spacings"] = spacings_um
+        header["space units"] = ["um", "um", "um"]
+
+    nrrd.write(str(path), stack, header=header)
+
+
+def _voxel_spacings_um(metadata: StackMetadata) -> list[float] | None:
+    if not (
+        metadata.voxel_size_z_m
+        and metadata.voxel_size_y_m
+        and metadata.voxel_size_x_m
+    ):
+        return None
+    z_um = metadata.voxel_size_z_m * 1_000_000
+    y_um = metadata.voxel_size_y_m * 1_000_000
+    x_um = metadata.voxel_size_x_m * 1_000_000
+    if z_um <= 0 or y_um <= 0 or x_um <= 0:
+        return None
+    return [z_um, y_um, x_um]
 
 
 def _safe_filename_part(value: str) -> str:

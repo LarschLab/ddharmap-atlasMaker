@@ -5,7 +5,7 @@ from typing import Any
 
 import numpy as np
 
-from PySide6.QtCore import QPoint, Qt, Signal
+from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QListWidget, QListWidgetItem, QWidget
 
@@ -48,11 +48,14 @@ class StackFileList(QListWidget):
 
 class RotationPreview(QWidget):
     angleChanged = Signal(float)
+    cropCenterChanged = Signal(object)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._pixmap: QPixmap | None = None
         self._angle = 0.0
+        self._crop_size_px = 750
+        self._crop_center_yx: tuple[int, int] | None = None
         self._drag_start_angle: float | None = None
         self._drag_start_rotation = 0.0
         self.setMinimumSize(520, 520)
@@ -64,6 +67,14 @@ class RotationPreview(QWidget):
 
     def set_angle(self, angle: float) -> None:
         self._angle = angle
+        self.update()
+
+    def set_crop_size(self, size_px: int) -> None:
+        self._crop_size_px = max(1, int(size_px))
+        self.update()
+
+    def set_crop_center(self, center_yx: tuple[int, int] | None) -> None:
+        self._crop_center_yx = center_yx
         self.update()
 
     def paintEvent(self, event: Any) -> None:
@@ -87,6 +98,8 @@ class RotationPreview(QWidget):
         painter.drawPixmap(-scaled.width() // 2, -scaled.height() // 2, scaled)
         painter.restore()
 
+        self._draw_crop_overlay(painter, center, scaled)
+
         painter.setPen(QPen(QColor("#ffffff")))
         painter.drawText(
             self.rect().adjusted(12, 12, -12, -12),
@@ -95,10 +108,18 @@ class RotationPreview(QWidget):
         )
 
     def mousePressEvent(self, event: Any) -> None:
-        if event.button() != Qt.MouseButton.LeftButton or self._pixmap is None:
+        if self._pixmap is None:
             return
-        self._drag_start_angle = self._point_angle(event.position().toPoint())
-        self._drag_start_rotation = self._angle
+        if event.button() == Qt.MouseButton.RightButton:
+            self._drag_start_angle = self._point_angle(event.position().toPoint())
+            self._drag_start_rotation = self._angle
+        elif event.button() == Qt.MouseButton.LeftButton:
+            center_yx = self._widget_point_to_rotated_center(
+                event.position().toPoint()
+            )
+            self._crop_center_yx = center_yx
+            self.cropCenterChanged.emit(center_yx)
+            self.update()
 
     def mouseMoveEvent(self, event: Any) -> None:
         if self._drag_start_angle is None:
@@ -109,7 +130,7 @@ class RotationPreview(QWidget):
         self.update()
 
     def mouseReleaseEvent(self, event: Any) -> None:
-        if event.button() == Qt.MouseButton.LeftButton:
+        if event.button() == Qt.MouseButton.RightButton:
             self._drag_start_angle = None
 
     def _point_angle(self, point: QPoint) -> float:
@@ -117,6 +138,87 @@ class RotationPreview(QWidget):
         dy = point.y() - center.y()
         dx = point.x() - center.x()
         return math.degrees(math.atan2(dy, dx))
+
+    def _scaled_image_rect(self) -> QRectF | None:
+        if self._pixmap is None:
+            return None
+        available = self.rect().adjusted(12, 12, -12, -12)
+        scaled = self._pixmap.scaled(
+            available.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        center = available.center()
+        return QRectF(
+            center.x() - scaled.width() / 2,
+            center.y() - scaled.height() / 2,
+            scaled.width(),
+            scaled.height(),
+        )
+
+    def _widget_point_to_rotated_center(self, point: QPoint) -> tuple[int, int]:
+        image_rect = self._scaled_image_rect()
+        if self._pixmap is None or image_rect is None:
+            return (0, 0)
+        scale = image_rect.width() / self._pixmap.width()
+        rotated_h, rotated_w = _rotated_shape_yx(
+            self._pixmap.height(), self._pixmap.width(), self._angle
+        )
+        center_x = (point.x() - image_rect.center().x()) / scale + rotated_w / 2
+        center_y = (point.y() - image_rect.center().y()) / scale + rotated_h / 2
+        return (int(round(center_y)), int(round(center_x)))
+
+    def _draw_crop_overlay(
+        self,
+        painter: QPainter,
+        image_center: QPoint,
+        scaled: QPixmap,
+    ) -> None:
+        if self._pixmap is None:
+            return
+        scale = scaled.width() / self._pixmap.width()
+        rotated_h, rotated_w = _rotated_shape_yx(
+            self._pixmap.height(), self._pixmap.width(), self._angle
+        )
+        center_y, center_x = self._crop_center_yx or (rotated_h // 2, rotated_w // 2)
+        overlay_center_x = image_center.x() + (center_x - rotated_w / 2) * scale
+        overlay_center_y = image_center.y() + (center_y - rotated_h / 2) * scale
+        side = self._crop_size_px * scale
+
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, False)
+        painter.setPen(QPen(QColor("#19d3ff"), 2, Qt.PenStyle.SolidLine))
+        painter.drawRect(
+            QRectF(
+                overlay_center_x - side / 2,
+                overlay_center_y - side / 2,
+                side,
+                side,
+            )
+        )
+        painter.setPen(QPen(QColor("#ffffff"), 1))
+        painter.drawLine(
+            int(overlay_center_x - 6),
+            int(overlay_center_y),
+            int(overlay_center_x + 6),
+            int(overlay_center_y),
+        )
+        painter.drawLine(
+            int(overlay_center_x),
+            int(overlay_center_y - 6),
+            int(overlay_center_x),
+            int(overlay_center_y + 6),
+        )
+        painter.restore()
+
+
+def _rotated_shape_yx(height: int, width: int, angle_degrees: float) -> tuple[int, int]:
+    angle = math.radians(angle_degrees)
+    cosine = abs(math.cos(angle))
+    sine = abs(math.sin(angle))
+    rotated_height = int(height * cosine + width * sine + 0.5)
+    rotated_width = int(width * cosine + height * sine + 0.5)
+    return max(1, rotated_height), max(1, rotated_width)
 
 
 def _array_to_pixmap(image: np.ndarray) -> QPixmap:

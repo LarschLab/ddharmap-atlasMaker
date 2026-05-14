@@ -8,6 +8,7 @@ import json
 
 PROJECT_FILENAME = "brain_atlas_preprocess_project.json"
 ANGLE_EPSILON = 1e-3
+DEFAULT_CROP_SIZE_PX = 750
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,7 @@ class StackFileState:
     path: str
     rotation_degrees: float = 0.0
     reviewed: bool = False
+    crop_center_yx: tuple[int, int] | None = None
     channels: list[ChannelInfo] = field(default_factory=list)
     axes: str | None = None
     shape: tuple[int, ...] | None = None
@@ -62,6 +64,9 @@ class StackFileState:
             "path": self.path,
             "rotation_degrees": self.rotation_degrees,
             "reviewed": self.reviewed,
+            "crop_center_yx": (
+                list(self.crop_center_yx) if self.crop_center_yx is not None else None
+            ),
             "channels": [channel.to_dict() for channel in self.channels],
             "axes": self.axes,
             "shape": list(self.shape) if self.shape is not None else None,
@@ -70,10 +75,16 @@ class StackFileState:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StackFileState":
         shape = data.get("shape")
+        crop_center = data.get("crop_center_yx")
         return cls(
             path=str(data["path"]),
             rotation_degrees=float(data.get("rotation_degrees", 0.0)),
             reviewed=bool(data.get("reviewed", False)),
+            crop_center_yx=(
+                (int(crop_center[0]), int(crop_center[1]))
+                if crop_center is not None
+                else None
+            ),
             channels=[
                 ChannelInfo.from_dict(channel) for channel in data.get("channels", [])
             ],
@@ -88,6 +99,7 @@ class ProjectState:
     files: list[StackFileState] = field(default_factory=list)
     interpolation: str = "linear"
     canvas_mode: str = "expand"
+    crop_size_px: int = DEFAULT_CROP_SIZE_PX
 
     def project_path(self) -> Path | None:
         if not self.output_root:
@@ -116,6 +128,7 @@ class ProjectState:
             "output_root": self.output_root,
             "interpolation": self.interpolation,
             "canvas_mode": self.canvas_mode,
+            "crop_size_px": self.crop_size_px,
             "files": [file_state.to_dict() for file_state in self.files],
         }
 
@@ -125,6 +138,7 @@ class ProjectState:
             output_root=data.get("output_root"),
             interpolation=str(data.get("interpolation", "linear")),
             canvas_mode=str(data.get("canvas_mode", "expand")),
+            crop_size_px=int(data.get("crop_size_px", DEFAULT_CROP_SIZE_PX)),
             files=[
                 StackFileState.from_dict(file_state)
                 for file_state in data.get("files", [])
