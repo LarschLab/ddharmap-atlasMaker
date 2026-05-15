@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -47,20 +48,52 @@ DEFAULT_MANIFEST = Path(
 DEFAULT_OUTPUT_ROOT = Path(
     "/Users/ddharmap/dataProcessing/testOutput/preprocess_benchmark_runs"
 )
-DEFAULT_VARIANTS = ("loop_gzip", "loop_raw", "batched_gzip", "batched_raw", "fused_raw")
+DEFAULT_VARIANTS = (
+    "loop_raw",
+    "loop_raw_threads_1",
+    "loop_raw_threads_2",
+    "loop_raw_threads_4",
+    "loop_gzip",
+    "batched_gzip",
+    "batched_raw",
+    "fused_raw",
+    "mps_fused_raw",
+)
 VARIANT_ENCODING = {
     "loop_gzip": "gzip",
     "loop_raw": "raw",
+    "loop_raw_threads_1": "raw",
+    "loop_raw_threads_2": "raw",
+    "loop_raw_threads_4": "raw",
     "batched_gzip": "gzip",
     "batched_raw": "raw",
     "fused_raw": "raw",
+    "mps_fused_raw": "raw",
+}
+DEFAULT_PARENT_VARIANTS = (
+    "loop_raw",
+    "loop_raw_threads_1",
+    "loop_raw_threads_2",
+    "loop_raw_threads_4",
+)
+EXACT_VARIANTS = {
+    "loop_gzip",
+    "loop_raw",
+    "loop_raw_threads_1",
+    "loop_raw_threads_2",
+    "loop_raw_threads_4",
+    "batched_gzip",
+    "batched_raw",
 }
 
 
 @dataclass
 class MemorySampler:
     interval_seconds: float = 0.02
+    sample_mps: bool = False
     peak_rss_bytes: int = 0
+    peak_mps_current_allocated_bytes: int = 0
+    peak_mps_driver_allocated_bytes: int = 0
     phase_peak_rss_bytes: dict[str, int] = field(default_factory=dict)
     _phase: str = "startup"
     _running: bool = False
@@ -68,11 +101,13 @@ class MemorySampler:
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def start(self) -> None:
+        self._sample_once()
         self._running = True
         self._thread = threading.Thread(target=self._sample_loop, daemon=True)
         self._thread.start()
 
     def stop(self) -> None:
+        self._sample_once()
         self._running = False
         if self._thread is not None:
             self._thread.join()
@@ -82,16 +117,32 @@ class MemorySampler:
             self._phase = phase
 
     def _sample_loop(self) -> None:
-        process = psutil.Process()
         while self._running:
-            rss = process.memory_info().rss
-            with self._lock:
-                self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
-                self.phase_peak_rss_bytes[self._phase] = max(
-                    self.phase_peak_rss_bytes.get(self._phase, 0),
-                    rss,
-                )
+            self._sample_once()
             time.sleep(self.interval_seconds)
+
+    def _sample_once(self) -> None:
+        rss = psutil.Process().memory_info().rss
+        torch_module = _torch_module_with_mps() if self.sample_mps else None
+        mps_current = 0
+        mps_driver = 0
+        if torch_module is not None:
+            mps_current = int(torch_module.mps.current_allocated_memory())
+            mps_driver = int(torch_module.mps.driver_allocated_memory())
+        with self._lock:
+            self.peak_rss_bytes = max(self.peak_rss_bytes, rss)
+            self.peak_mps_current_allocated_bytes = max(
+                self.peak_mps_current_allocated_bytes,
+                mps_current,
+            )
+            self.peak_mps_driver_allocated_bytes = max(
+                self.peak_mps_driver_allocated_bytes,
+                mps_driver,
+            )
+            self.phase_peak_rss_bytes[self._phase] = max(
+                self.phase_peak_rss_bytes.get(self._phase, 0),
+                rss,
+            )
 
 
 @dataclass
@@ -140,7 +191,12 @@ def _build_parser() -> argparse.ArgumentParser:
         "--variants",
         nargs="+",
         choices=DEFAULT_VARIANTS,
-        default=list(DEFAULT_VARIANTS),
+        default=list(DEFAULT_PARENT_VARIANTS),
+    )
+    parser.add_argument(
+        "--include-mps",
+        action="store_true",
+        help="Include the experimental PyTorch MPS fused rotate/crop variant.",
     )
     parser.add_argument("--keep-outputs", action="store_true")
     parser.add_argument("--sample-interval-seconds", type=float, default=0.02)
@@ -170,7 +226,10 @@ def _run_parent(args: argparse.Namespace) -> int:
     baseline_output_dir: Path | None = None
     baseline_manifest: dict[str, Any] | None = None
 
-    ordered_variants = list(dict.fromkeys(["loop_gzip", *args.variants]))
+    selected_variants = list(args.variants)
+    if args.include_mps and "mps_fused_raw" not in selected_variants:
+        selected_variants.append("mps_fused_raw")
+    ordered_variants = list(dict.fromkeys(["loop_raw", *selected_variants]))
     for variant in ordered_variants:
         for repeat_index in range(args.repeats):
             child_run_dir = run_root / f"{variant}_repeat_{repeat_index + 1}"
@@ -211,7 +270,7 @@ def _run_parent(args: argparse.Namespace) -> int:
             output_dir = Path(result["output_dir"])
             manifest = json.loads((output_dir / "preprocess_manifest.json").read_text())
 
-            if variant == "loop_gzip" and repeat_index == 0:
+            if variant == "loop_raw" and repeat_index == 0:
                 baseline_output_dir = output_dir
                 baseline_manifest = manifest
                 result["valid"] = True
@@ -225,7 +284,9 @@ def _run_parent(args: argparse.Namespace) -> int:
                     output_dir,
                     manifest,
                 )
-                result["valid"] = comparison["valid"]
+                result["valid"] = (
+                    comparison["valid"] if variant in EXACT_VARIANTS else False
+                )
                 result["correctness"] = comparison
 
             results.append(result)
@@ -255,7 +316,10 @@ def _run_one(args: argparse.Namespace) -> int:
         raise SystemExit("--run-one requires --variant, --run-dir, and --result-json")
 
     args.run_dir.mkdir(parents=True, exist_ok=True)
-    sampler = MemorySampler(interval_seconds=args.sample_interval_seconds)
+    sampler = MemorySampler(
+        interval_seconds=args.sample_interval_seconds,
+        sample_mps=args.variant == "mps_fused_raw",
+    )
     context = RunContext(sampler=sampler)
     sampler.start()
     started = time.perf_counter()
@@ -281,6 +345,7 @@ def _run_one(args: argparse.Namespace) -> int:
         "phase_seconds": context.phase_seconds,
         "peak_rss_bytes": sampler.peak_rss_bytes,
         "phase_peak_rss_bytes": sampler.phase_peak_rss_bytes,
+        "mps_memory_bytes": _mps_memory_stats(sampler),
         "output_dir": str(output_dir),
         "output_size_bytes": _directory_size(output_dir),
     }
@@ -380,7 +445,18 @@ def _export_variant(
     output_files: list[dict[str, Any]] = []
     qc: dict[str, Any] | None = None
 
-    if variant.startswith("batched"):
+    if variant.startswith("loop_raw_threads_"):
+        transformed_channels = _threaded_transformed_channels(
+            variant,
+            metadata,
+            data,
+            applied_rotation_degrees,
+            file_state.crop_center_yx,
+            crop_size_px,
+            context,
+        )
+        channel_iter = iter(transformed_channels)
+    elif variant.startswith("batched"):
         with context.phase("transform"):
             rotated = _rotate_zcyx(
                 data,
@@ -410,6 +486,23 @@ def _export_variant(
                             file_state.crop_center_yx,
                             crop_size_px,
                             interpolation="linear",
+                            expand_canvas=True,
+                        ),
+                    )
+                )
+        channel_iter = iter(transformed_channels)
+    elif variant == "mps_fused_raw":
+        transformed_channels = []
+        with context.phase("transform"):
+            for channel in metadata.channels:
+                transformed_channels.append(
+                    (
+                        channel,
+                        _rotate_crop_stack_zyx_mps(
+                            data[:, channel.index, :, :],
+                            applied_rotation_degrees,
+                            file_state.crop_center_yx,
+                            crop_size_px,
                             expand_canvas=True,
                         ),
                     )
@@ -502,6 +595,52 @@ def _loop_transformed_channels(
             )
             cropped = crop_square_zyx(rotated, crop_center_yx, crop_size_px)
         yield channel, cropped
+
+
+def _threaded_transformed_channels(
+    variant: str,
+    metadata: StackMetadata,
+    data: np.ndarray,
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    context: RunContext,
+) -> list[tuple[ChannelInfo, np.ndarray]]:
+    max_workers = int(variant.rsplit("_", maxsplit=1)[1])
+    transformed: dict[int, tuple[ChannelInfo, np.ndarray]] = {}
+    with context.phase("transform"):
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(
+                    _transform_one_channel,
+                    channel,
+                    data[:, channel.index, :, :],
+                    applied_rotation_degrees,
+                    crop_center_yx,
+                    crop_size_px,
+                ): channel
+                for channel in metadata.channels
+            }
+            for future in as_completed(futures):
+                channel, cropped = future.result()
+                transformed[channel.index] = (channel, cropped)
+    return [transformed[channel.index] for channel in metadata.channels]
+
+
+def _transform_one_channel(
+    channel: ChannelInfo,
+    channel_stack: np.ndarray,
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+) -> tuple[ChannelInfo, np.ndarray]:
+    rotated = rotate_stack_zyx(
+        channel_stack,
+        applied_rotation_degrees,
+        interpolation="linear",
+        expand_canvas=True,
+    )
+    return channel, crop_square_zyx(rotated, crop_center_yx, crop_size_px)
 
 
 def _rotate_zcyx(
@@ -610,6 +749,124 @@ def _rotate_crop_stack_zyx_fused(
     return output
 
 
+def _rotate_crop_stack_zyx_mps(
+    stack: np.ndarray,
+    angle_degrees: float,
+    center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    expand_canvas: bool,
+) -> np.ndarray:
+    try:
+        import torch
+    except ImportError as exc:
+        raise RuntimeError("PyTorch is required for the MPS benchmark variant.") from exc
+    if not torch.backends.mps.is_available():
+        raise RuntimeError("PyTorch MPS is not available on this machine.")
+
+    device = torch.device("mps")
+    rot_matrix, crop_offset = _fused_rotate_crop_geometry(
+        stack.shape[-2:],
+        angle_degrees,
+        center_yx,
+        crop_size_px,
+        expand_canvas=expand_canvas,
+    )
+    grid = _torch_grid_from_scipy_geometry(
+        rot_matrix,
+        crop_offset,
+        input_shape_yx=stack.shape[-2:],
+        crop_size_px=crop_size_px,
+        depth=stack.shape[0],
+        device=device,
+        torch_module=torch,
+    )
+
+    source = torch.as_tensor(stack.astype(np.float32, copy=False), device=device)
+    source = source[:, None, :, :]
+    sampled = torch.nn.functional.grid_sample(
+        source,
+        grid,
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=True,
+    )
+    torch.mps.synchronize()
+    array = sampled[:, 0, :, :].cpu().numpy()
+    return _preserve_numpy_dtype(array, stack.dtype)
+
+
+def _fused_rotate_crop_geometry(
+    input_shape_yx: tuple[int, int],
+    angle_degrees: float,
+    center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    expand_canvas: bool,
+) -> tuple[np.ndarray, np.ndarray]:
+    c, s = special.cosdg(angle_degrees), special.sindg(angle_degrees)
+    rot_matrix = np.array([[c, s], [-s, c]], dtype=np.float64)
+    in_plane_shape = np.asarray(input_shape_yx, dtype=np.float64)
+    if expand_canvas:
+        iy, ix = in_plane_shape
+        out_bounds = rot_matrix @ [[0, 0, iy, iy], [0, ix, 0, ix]]
+        out_plane_shape = (np.ptp(out_bounds, axis=1) + 0.5).astype(int)
+    else:
+        out_plane_shape = in_plane_shape.astype(int)
+
+    out_center = rot_matrix @ ((out_plane_shape - 1) / 2)
+    in_center = (in_plane_shape - 1) / 2
+    offset = in_center - out_center
+    if center_yx is None:
+        center_y = int(out_plane_shape[0]) // 2
+        center_x = int(out_plane_shape[1]) // 2
+    else:
+        center_y, center_x = center_yx
+    crop_start = np.array(
+        [int(center_y) - crop_size_px // 2, int(center_x) - crop_size_px // 2],
+        dtype=np.float64,
+    )
+    return rot_matrix, offset + rot_matrix @ crop_start
+
+
+def _torch_grid_from_scipy_geometry(
+    rot_matrix: np.ndarray,
+    crop_offset: np.ndarray,
+    *,
+    input_shape_yx: tuple[int, int],
+    crop_size_px: int,
+    depth: int,
+    device: Any,
+    torch_module: Any,
+) -> Any:
+    y = torch_module.arange(crop_size_px, dtype=torch_module.float32, device=device)
+    x = torch_module.arange(crop_size_px, dtype=torch_module.float32, device=device)
+    yy, xx = torch_module.meshgrid(y, x, indexing="ij")
+    coords_y = (
+        float(rot_matrix[0, 0]) * yy
+        + float(rot_matrix[0, 1]) * xx
+        + float(crop_offset[0])
+    )
+    coords_x = (
+        float(rot_matrix[1, 0]) * yy
+        + float(rot_matrix[1, 1]) * xx
+        + float(crop_offset[1])
+    )
+    height, width = input_shape_yx
+    norm_x = (coords_x / float(width - 1)) * 2.0 - 1.0
+    norm_y = (coords_y / float(height - 1)) * 2.0 - 1.0
+    grid = torch_module.stack([norm_x, norm_y], dim=-1)
+    return grid[None, :, :, :].repeat(depth, 1, 1, 1)
+
+
+def _preserve_numpy_dtype(array: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
+    target_dtype = np.dtype(dtype)
+    if np.issubdtype(target_dtype, np.integer):
+        info = np.iinfo(target_dtype)
+        array = np.clip(np.rint(array), info.min, info.max)
+    return array.astype(target_dtype, copy=False)
+
+
 def _compare_output_dirs(
     baseline_dir: Path,
     baseline_manifest: dict[str, Any],
@@ -637,6 +894,7 @@ def _compare_output_dirs(
         same = np.array_equal(baseline_array, candidate_array)
         diff_count = 0
         max_abs_diff = 0.0
+        diff_fraction = 0.0
         if not same:
             valid = False
             diff = np.abs(
@@ -644,12 +902,14 @@ def _compare_output_dirs(
             )
             diff_count = int(np.count_nonzero(diff))
             max_abs_diff = float(diff.max()) if diff.size else 0.0
+            diff_fraction = diff_count / int(diff.size) if diff.size else 0.0
         details.append(
             {
                 "channel": baseline_file["channel"],
                 "same": same,
                 "diff_count": diff_count,
                 "max_abs_diff": max_abs_diff,
+                "diff_fraction": diff_fraction,
                 "shape": list(candidate_array.shape),
                 "dtype": str(candidate_array.dtype),
             }
@@ -683,7 +943,7 @@ def _aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
     baseline_times = [
         result["wall_seconds"]
         for result in results
-        if result["variant"] == "loop_gzip"
+        if result["variant"] == "loop_raw"
     ]
     baseline_median = _median(baseline_times)
     aggregate: dict[str, Any] = {}
@@ -701,7 +961,23 @@ def _aggregate_results(results: list[dict[str, Any]]) -> dict[str, Any]:
             "median_output_size_bytes": _median(
                 [result["output_size_bytes"] for result in variant_results]
             ),
-            "speedup_vs_loop_gzip": (
+            "median_mps_current_allocated_bytes": _median(
+                [
+                    result.get("mps_memory_bytes", {}).get(
+                        "peak_current_allocated_memory", 0
+                    )
+                    for result in variant_results
+                ]
+            ),
+            "median_mps_driver_allocated_bytes": _median(
+                [
+                    result.get("mps_memory_bytes", {}).get(
+                        "peak_driver_allocated_memory", 0
+                    )
+                    for result in variant_results
+                ]
+            ),
+            "speedup_vs_loop_raw": (
                 baseline_median / _median(wall) if baseline_median else None
             ),
         }
@@ -716,6 +992,8 @@ def _write_summary_csv(path: Path, results: list[dict[str, Any]]) -> None:
         "wall_seconds",
         "peak_rss_bytes",
         "output_size_bytes",
+        "mps_current_allocated_bytes",
+        "mps_driver_allocated_bytes",
         "metadata_seconds",
         "read_seconds",
         "transform_seconds",
@@ -735,6 +1013,12 @@ def _write_summary_csv(path: Path, results: list[dict[str, Any]]) -> None:
                     "wall_seconds": result["wall_seconds"],
                     "peak_rss_bytes": result["peak_rss_bytes"],
                     "output_size_bytes": result["output_size_bytes"],
+                    "mps_current_allocated_bytes": result.get("mps_memory_bytes", {}).get(
+                        "peak_current_allocated_memory", 0
+                    ),
+                    "mps_driver_allocated_bytes": result.get("mps_memory_bytes", {}).get(
+                        "peak_driver_allocated_memory", 0
+                    ),
                     "metadata_seconds": phases.get("metadata", 0.0),
                     "read_seconds": phases.get("read", 0.0),
                     "transform_seconds": phases.get("transform", 0.0),
@@ -746,12 +1030,12 @@ def _write_summary_csv(path: Path, results: list[dict[str, Any]]) -> None:
 
 def _print_summary(summary: dict[str, Any]) -> None:
     print(f"Summary written under: {summary['run_root']}")
-    print("variant, valid_runs, median_s, speedup, median_peak_rss_mb, median_size_mb")
+    print("variant, valid_runs, median_s, speedup_vs_loop_raw, median_peak_rss_mb, median_size_mb")
     for variant, row in summary["aggregate"].items():
         print(
             f"{variant}, {row['valid_runs']}/{row['total_runs']}, "
             f"{row['median_wall_seconds']:.3f}, "
-            f"{row['speedup_vs_loop_gzip']:.2f}, "
+            f"{row['speedup_vs_loop_raw']:.2f}, "
             f"{row['median_peak_rss_bytes'] / 1024 / 1024:.1f}, "
             f"{row['median_output_size_bytes'] / 1024 / 1024:.1f}"
         )
@@ -759,6 +1043,33 @@ def _print_summary(summary: dict[str, Any]) -> None:
 
 def _directory_size(path: Path) -> int:
     return sum(item.stat().st_size for item in path.rglob("*") if item.is_file())
+
+
+def _torch_module_with_mps() -> Any | None:
+    try:
+        import torch
+    except ImportError:
+        return None
+    if not torch.backends.mps.is_available():
+        return None
+    return torch
+
+
+def _mps_memory_stats(sampler: MemorySampler) -> dict[str, int]:
+    if not sampler.sample_mps:
+        return {}
+    torch = _torch_module_with_mps()
+    if torch is None:
+        return {}
+    return {
+        "final_current_allocated_memory": int(torch.mps.current_allocated_memory()),
+        "final_driver_allocated_memory": int(torch.mps.driver_allocated_memory()),
+        "peak_current_allocated_memory": int(
+            sampler.peak_mps_current_allocated_bytes
+        ),
+        "peak_driver_allocated_memory": int(sampler.peak_mps_driver_allocated_bytes),
+        "recommended_max_memory": int(torch.mps.recommended_max_memory()),
+    }
 
 
 def _median(values: list[float]) -> float:

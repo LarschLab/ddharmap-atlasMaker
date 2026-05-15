@@ -20,6 +20,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 - `StackFormatError`: user-facing input contract failure.
 - `StackMetadata`: read-only source metadata and manifest serialization.
+- `DEFAULT_TRANSFORM_WORKERS`: default CPU channel-transform worker count for exports.
 - `parse_gene_wavelength_pairs`: filename gene/wavelength parser.
 - `build_channel_mapping`: channel order and DAPI append authority.
 - `read_lsm_metadata`: LSM metadata contract and axes validation.

@@ -261,6 +261,81 @@ def test_export_preprocessed_channels_writes_raw_nrrd_by_default(tmp_path, monke
     np.testing.assert_array_equal(exported, data[:, 0, 0:2, 1:3])
 
 
+def test_export_preprocessed_channels_threaded_matches_single_worker(
+    tmp_path, monkeypatch
+):
+    nrrd = pytest.importorskip("nrrd")
+    channels = [
+        ChannelInfo(index=0, gene="gene_a", wavelength_nm=546),
+        ChannelInfo(index=1, gene="gene_b", wavelength_nm=488),
+        ChannelInfo(index=2, gene="DAPI", wavelength_nm=740),
+    ]
+    metadata = StackMetadata(
+        path=str(tmp_path / "sample_gene_a_546_gene_b_488.lsm"),
+        axes="ZCYX",
+        shape=(3, 3, 8, 9),
+        dtype="uint8",
+        channels=channels,
+    )
+    data = (np.arange(np.prod(metadata.shape), dtype=np.uint16) % 251).astype(
+        np.uint8
+    )
+    data = data.reshape(metadata.shape)
+
+    class FakeSeries:
+        def asarray(self):
+            return data
+
+    class FakeTiffFile:
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.read_lsm_metadata", lambda path: metadata
+    )
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    file_state = StackFileState(
+        path=metadata.path,
+        rotation_degrees=17.5,
+        crop_center_yx=(4, 4),
+    )
+    single_dir = export_preprocessed_channels(
+        file_state,
+        tmp_path / "single",
+        crop_size_px=6,
+        transform_workers=1,
+    )
+    threaded_dir = export_preprocessed_channels(
+        file_state,
+        tmp_path / "threaded",
+        crop_size_px=6,
+        transform_workers=4,
+    )
+
+    single_manifest = json.loads((single_dir / "preprocess_manifest.json").read_text())
+    threaded_manifest = json.loads(
+        (threaded_dir / "preprocess_manifest.json").read_text()
+    )
+
+    assert [item["channel"] for item in threaded_manifest["output_files"]] == [
+        item["channel"] for item in single_manifest["output_files"]
+    ]
+    for single_file, threaded_file in zip(
+        single_manifest["output_files"],
+        threaded_manifest["output_files"],
+    ):
+        single_array, _ = nrrd.read(single_file["path"], index_order="C")
+        threaded_array, _ = nrrd.read(threaded_file["path"], index_order="C")
+        np.testing.assert_array_equal(threaded_array, single_array)
+
+
 def test_export_preprocessed_channels_writes_rotated_itk_readable_nrrd(
     tmp_path, monkeypatch
 ):

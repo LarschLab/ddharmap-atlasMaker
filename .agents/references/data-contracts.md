@@ -29,6 +29,7 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Rotation operates on `ZYX` stacks around the `Y/X` plane.
 - Stored `rotation_degrees` uses the Qt preview convention; export applies the negated angle so output orientation matches the preview.
 - Supported interpolation names are `nearest`, `linear`, and `cubic`.
+- Export transforms channels with four CPU worker threads by default; this must remain bit-identical to single-worker SciPy output.
 - Zero-degree rotation returns a copy, not the original object.
 - Integer dtypes are rounded, clipped, and preserved after rotation.
 - Cropping returns shape `(Z, crop_size_px, crop_size_px)`.

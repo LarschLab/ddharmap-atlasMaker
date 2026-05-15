@@ -79,3 +79,27 @@ Passes completed: Switched the default NRRD writer encoding from gzip to raw whi
 What changed: `export_preprocessed_channels` now writes uncompressed NRRD files by default. The data contract records raw encoding as canonical; gzip-specific tests opt into gzip explicitly.
 Rerun implications: New preprocessing outputs will be larger but substantially faster to write. Existing gzip-compressed output folders remain readable.
 Validation performed: `pytest tests/test_io.py tests/test_export_integrity.py tests/test_benchmark_preprocess.py -q`; `pytest -q`.
+
+## 2026-05-15 - threaded CPU and MPS benchmark variants
+
+Slice goal: Measure remaining transform acceleration options after raw NRRD removed the write bottleneck.
+Passes completed: Added channel-threaded CPU variants and an experimental PyTorch MPS fused rotate/crop variant with tolerance reporting and peak MPS memory sampling.
+What changed: `scripts/benchmark_preprocess.py` now benchmarks `loop_raw_threads_1/2/4` exactly against `loop_raw` and can include `mps_fused_raw` with `--include-mps`. Benchmark summaries now use `loop_raw` as the speedup baseline and include MPS memory fields.
+Rerun implications: CPU thread variants are exact candidate optimizations; MPS is faster but remains non-bit-identical and should not be promoted without scientific tolerance review.
+Validation performed: `pytest tests/test_benchmark_preprocess.py -q`; `python -m py_compile scripts/benchmark_preprocess.py`; `python scripts/benchmark_preprocess.py --repeats 1 --variants loop_raw loop_raw_threads_1 loop_raw_threads_2 loop_raw_threads_4 --include-mps`; `pytest -q`.
+
+## 2026-05-15 - preprocessing benchmark report
+
+Slice goal: Preserve benchmark conclusions and the open MPS/ANTs registration question for later group review.
+Passes completed: Summarized raw CPU, threaded CPU, and MPS benchmark results from the representative stack.
+What changed: Added `.agents/references/preprocess-benchmark-report.md` with timing, memory, MPS difference metrics, production recommendations, and suggested downstream ANTs validation.
+Rerun implications: Use the report as the starting point before changing production acceleration defaults.
+Validation performed: Documentation-only update.
+
+## 2026-05-15 - four-worker CPU transform default
+
+Slice goal: Promote the exact threaded CPU benchmark winner to production preprocessing.
+Passes completed: Changed channel transforms to use four CPU worker threads by default while preserving single-worker output semantics and main-thread NRRD writing.
+What changed: `export_preprocessed_channels` now defaults to four channel transform workers. Added a regression comparing one-worker and four-worker exports byte-for-byte after NRRD readback.
+Rerun implications: New preprocessing exports should be faster and remain bit-identical to the prior single-worker SciPy transform path.
+Validation performed: `pytest tests/test_io.py -q`; `pytest -q`.

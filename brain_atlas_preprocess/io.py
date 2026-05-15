@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ EXPECTED_GENE_WAVELENGTH_ORDER = [546, 488, 647]
 DAPI_WAVELENGTH_NM = 740
 DAPI_GENE = "DAPI"
 SUPPORTED_INTERPOLATION = {"nearest": 0, "linear": 1, "cubic": 3}
+DEFAULT_TRANSFORM_WORKERS = 4
 
 
 class StackFormatError(ValueError):
@@ -245,9 +247,14 @@ def export_preprocessed_channels(
     crop_size_px: int = 750,
     nrrd_encoding: str = "raw",
     nrrd_compression_level: int = 9,
+    transform_workers: int = DEFAULT_TRANSFORM_WORKERS,
 ) -> Path:
     if interpolation not in SUPPORTED_INTERPOLATION:
         raise ValueError(f"Unsupported interpolation: {interpolation}")
+    if transform_workers < 1:
+        raise ValueError(
+            f"Transform workers must be at least 1, got {transform_workers}."
+        )
     source = Path(file_state.path)
     metadata = read_lsm_metadata(source)
     output_dir = Path(output_root) / f"{source.stem}_preprocessed"
@@ -261,15 +268,17 @@ def export_preprocessed_channels(
     applied_rotation_degrees = preview_angle_to_export_angle(
         file_state.rotation_degrees
     )
-    for channel in metadata.channels:
-        channel_stack = data[:, channel.index, :, :]
-        rotated = rotate_stack_zyx(
-            channel_stack,
-            applied_rotation_degrees,
-            interpolation=interpolation,
-            expand_canvas=expand_canvas,
-        )
-        cropped = crop_square_zyx(rotated, file_state.crop_center_yx, crop_size_px)
+    transformed_channels = _transform_preprocessed_channels(
+        data,
+        metadata.channels,
+        applied_rotation_degrees,
+        file_state.crop_center_yx,
+        crop_size_px,
+        interpolation=interpolation,
+        expand_canvas=expand_canvas,
+        transform_workers=transform_workers,
+    )
+    for channel, cropped in transformed_channels:
         out_name = (
             f"{source.stem}_{_safe_filename_part(channel.gene)}_"
             f"{channel.wavelength_nm}nm_preprocessed.nrrd"
@@ -321,6 +330,74 @@ def export_preprocessed_channels(
     manifest_path = output_dir / "preprocess_manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return output_dir
+
+
+def _transform_preprocessed_channels(
+    data: np.ndarray,
+    channels: list[ChannelInfo],
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    interpolation: str,
+    expand_canvas: bool,
+    transform_workers: int,
+) -> list[tuple[ChannelInfo, np.ndarray]]:
+    if transform_workers == 1 or len(channels) <= 1:
+        return [
+            _transform_preprocessed_channel(
+                data,
+                channel,
+                applied_rotation_degrees,
+                crop_center_yx,
+                crop_size_px,
+                interpolation=interpolation,
+                expand_canvas=expand_canvas,
+            )
+            for channel in channels
+        ]
+
+    transformed: dict[int, tuple[ChannelInfo, np.ndarray]] = {}
+    max_workers = min(transform_workers, len(channels))
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(
+                _transform_preprocessed_channel,
+                data,
+                channel,
+                applied_rotation_degrees,
+                crop_center_yx,
+                crop_size_px,
+                interpolation=interpolation,
+                expand_canvas=expand_canvas,
+            ): channel
+            for channel in channels
+        }
+        for future in as_completed(futures):
+            channel, cropped = future.result()
+            transformed[channel.index] = (channel, cropped)
+    return [transformed[channel.index] for channel in channels]
+
+
+def _transform_preprocessed_channel(
+    data: np.ndarray,
+    channel: ChannelInfo,
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    interpolation: str,
+    expand_canvas: bool,
+) -> tuple[ChannelInfo, np.ndarray]:
+    channel_stack = data[:, channel.index, :, :]
+    rotated = rotate_stack_zyx(
+        channel_stack,
+        applied_rotation_degrees,
+        interpolation=interpolation,
+        expand_canvas=expand_canvas,
+    )
+    cropped = crop_square_zyx(rotated, crop_center_yx, crop_size_px)
+    return channel, cropped
 
 
 def export_rotated_channels(
