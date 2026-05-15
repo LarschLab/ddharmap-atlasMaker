@@ -6,6 +6,8 @@ from typing import Any
 import json
 import math
 import re
+import struct
+import zlib
 
 import numpy as np
 from scipy import ndimage
@@ -190,6 +192,10 @@ def rotate_stack_zyx(
     return _preserve_dtype(rotated, stack.dtype)
 
 
+def preview_angle_to_export_angle(angle_degrees: float) -> float:
+    return -float(angle_degrees)
+
+
 def crop_square_zyx(
     stack: np.ndarray,
     center_yx: tuple[int, int] | None,
@@ -249,11 +255,15 @@ def export_preprocessed_channels(
         data = tiff.series[0].asarray()
 
     output_files: list[dict[str, Any]] = []
+    qc: dict[str, Any] | None = None
+    applied_rotation_degrees = preview_angle_to_export_angle(
+        file_state.rotation_degrees
+    )
     for channel in metadata.channels:
         channel_stack = data[:, channel.index, :, :]
         rotated = rotate_stack_zyx(
             channel_stack,
-            file_state.rotation_degrees,
+            applied_rotation_degrees,
             interpolation=interpolation,
             expand_canvas=expand_canvas,
         )
@@ -269,6 +279,7 @@ def export_preprocessed_channels(
             metadata,
             channel=channel,
             rotation_degrees=file_state.rotation_degrees,
+            applied_rotation_degrees=applied_rotation_degrees,
             crop_center_yx=file_state.crop_center_yx,
             crop_size_px=crop_size_px,
         )
@@ -279,10 +290,19 @@ def export_preprocessed_channels(
                 "shape": list(cropped.shape),
             }
         )
+        if channel.gene == DAPI_GENE and channel.wavelength_nm == DAPI_WAVELENGTH_NM:
+            qc_path = output_dir / "preprocess_qc_dapi_mip.png"
+            _write_stack_mip_png(qc_path, cropped)
+            qc = {
+                "dapi_mip_path": str(qc_path),
+                "rotation_degrees": file_state.rotation_degrees,
+                "applied_rotation_degrees": applied_rotation_degrees,
+            }
 
     manifest = {
         **metadata.to_manifest_dict(),
         "rotation_degrees": file_state.rotation_degrees,
+        "applied_rotation_degrees": applied_rotation_degrees,
         "interpolation": interpolation,
         "canvas_mode": "expand" if expand_canvas else "keep_original_size",
         "crop_size_px": crop_size_px,
@@ -291,6 +311,7 @@ def export_preprocessed_channels(
             if file_state.crop_center_yx is not None
             else None
         ),
+        "qc": qc,
         "output_files": output_files,
     }
     manifest_path = output_dir / "preprocess_manifest.json"
@@ -339,6 +360,54 @@ def _preserve_dtype(array: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:
     return array.astype(target_dtype, copy=False)
 
 
+def _write_stack_mip_png(path: Path, stack: np.ndarray) -> None:
+    mip = stack.max(axis=0)
+    _write_grayscale_png(path, _normalize_to_uint8(mip))
+
+
+def _normalize_to_uint8(image: np.ndarray) -> np.ndarray:
+    finite = np.nan_to_num(np.asarray(image).astype(np.float32, copy=False))
+    if finite.size == 0:
+        return np.zeros(finite.shape, dtype=np.uint8)
+    low, high = np.percentile(finite, [1, 99.5])
+    if high <= low:
+        high = float(finite.max())
+        low = float(finite.min())
+    if high <= low:
+        return np.zeros(finite.shape, dtype=np.uint8)
+    normalized = np.clip((finite - low) / (high - low), 0, 1)
+    return (normalized * 255).astype(np.uint8)
+
+
+def _write_grayscale_png(path: Path, image: np.ndarray) -> None:
+    if image.ndim != 2:
+        raise ValueError(f"Expected 2-D image, got shape {image.shape}.")
+    contiguous = np.ascontiguousarray(image, dtype=np.uint8)
+    height, width = contiguous.shape
+    raw_rows = b"".join(b"\x00" + row.tobytes() for row in contiguous)
+    payload = [
+        b"\x89PNG\r\n\x1a\n",
+        _png_chunk(
+            b"IHDR",
+            struct.pack(">IIBBBBB", width, height, 8, 0, 0, 0, 0),
+        ),
+        _png_chunk(b"IDAT", zlib.compress(raw_rows)),
+        _png_chunk(b"IEND", b""),
+    ]
+    path.write_bytes(b"".join(payload))
+
+
+def _png_chunk(kind: bytes, data: bytes) -> bytes:
+    checksum = zlib.crc32(kind)
+    checksum = zlib.crc32(data, checksum)
+    return (
+        struct.pack(">I", len(data))
+        + kind
+        + data
+        + struct.pack(">I", checksum & 0xFFFFFFFF)
+    )
+
+
 def _write_stack_tiff(path: Path, stack: np.ndarray, metadata: StackMetadata) -> None:
     imagej_metadata: dict[str, Any] = {"axes": "ZYX"}
     if metadata.voxel_size_z_m:
@@ -365,6 +434,7 @@ def _write_stack_nrrd(
     *,
     channel: ChannelInfo,
     rotation_degrees: float,
+    applied_rotation_degrees: float,
     crop_center_yx: tuple[int, int] | None,
     crop_size_px: int,
 ) -> None:
@@ -377,24 +447,30 @@ def _write_stack_nrrd(
         "source_path": metadata.path,
         "source_name": Path(metadata.path).name,
         "source_axes": metadata.axes,
+        "array_axes": "ZYX",
         "source_shape": json.dumps(list(metadata.shape)),
         "source_dtype": metadata.dtype,
         "channel_index": channel.index,
         "channel_gene": channel.gene,
         "channel_wavelength_nm": channel.wavelength_nm,
         "rotation_degrees": float(rotation_degrees),
+        "applied_rotation_degrees": float(applied_rotation_degrees),
         "crop_size_px": int(crop_size_px),
         "crop_center_yx": json.dumps(list(crop_center_yx) if crop_center_yx else None),
+        "labels": ["x", "y", "z"],
     }
-    spacings_um = _voxel_spacings_um(metadata)
-    if spacings_um is not None:
-        header["spacings"] = spacings_um
+    space_directions_um = _nrrd_space_directions_um(metadata)
+    if space_directions_um is not None:
+        header["space dimension"] = 3
+        header["space directions"] = space_directions_um
         header["space units"] = ["um", "um", "um"]
 
-    nrrd.write(str(path), stack, header=header)
+    # The in-memory stack is NumPy C-order ZYX. pynrrd defaults to Fortran
+    # axis order, which writes a header external tools can interpret as XYZ.
+    nrrd.write(str(path), stack, header=header, index_order="C")
 
 
-def _voxel_spacings_um(metadata: StackMetadata) -> list[float] | None:
+def _nrrd_space_directions_um(metadata: StackMetadata) -> list[list[float]] | None:
     if not (
         metadata.voxel_size_z_m
         and metadata.voxel_size_y_m
@@ -406,7 +482,11 @@ def _voxel_spacings_um(metadata: StackMetadata) -> list[float] | None:
     x_um = metadata.voxel_size_x_m * 1_000_000
     if z_um <= 0 or y_um <= 0 or x_um <= 0:
         return None
-    return [z_um, y_um, x_um]
+    return [
+        [x_um, 0.0, 0.0],
+        [0.0, y_um, 0.0],
+        [0.0, 0.0, z_um],
+    ]
 
 
 def _safe_filename_part(value: str) -> str:

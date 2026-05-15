@@ -27,6 +27,7 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 ## Transform contract
 
 - Rotation operates on `ZYX` stacks around the `Y/X` plane.
+- Stored `rotation_degrees` uses the Qt preview convention; export applies the negated angle so output orientation matches the preview.
 - Supported interpolation names are `nearest`, `linear`, and `cubic`.
 - Zero-degree rotation returns a copy, not the original object.
 - Integer dtypes are rounded, clipped, and preserved after rotation.
@@ -40,8 +41,10 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Export directory is `<source_stem>_preprocessed/` under the output root.
 - Channel file name is `<source_stem>_<safe_gene>_<wavelength>nm_preprocessed.nrrd`.
 - Manifest file name is `preprocess_manifest.json`.
-- NRRD headers carry source path/name, source axes/shape/dtype, channel metadata, rotation, crop size, crop center, and voxel spacings when available.
-- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, and output file list.
+- DAPI QC image file name is `preprocess_qc_dapi_mip.png`.
+- Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
+- NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` when spacings are available.
+- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, QC image metadata, and output file list.
 
 ## Validation
 
