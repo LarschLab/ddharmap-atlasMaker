@@ -55,3 +55,27 @@ Passes completed: Compared Qt positive-angle visual direction with SciPy `ndimag
 What changed: Added a preview-to-export angle adapter so `rotation_degrees` stays as the user-visible preview angle while export applies the negated angle. Manifest, NRRD headers, and QC metadata now include `applied_rotation_degrees`.
 Rerun implications: Existing output folders should be regenerated; existing project JSON angles do not need migration.
 Validation performed: `pytest tests/test_io.py -q`; `pytest -q`; temporary asymmetric QC PNG inspection.
+
+## 2026-05-15 - NRRD export integrity audit
+
+Slice goal: Explain channel file-size differences and guard against accidental data loss in compressed NRRD exports.
+Passes completed: Inspected a real rotated/cropped sample output, decoded NRRD headers and arrays, and recomputed outputs from the source `.lsm`.
+What changed: Added exporter integrity tests for gzip size differences, decoded voxel equality, transform-induced value changes, and opt-in real-sample source parity. Added `scripts/diagnose_nrrd_export.py` for per-channel size/stat/checksum/source-verification reports.
+Rerun implications: Existing gzip-compressed outputs can have different file sizes even with identical decoded shapes and raw byte counts; use the diagnostic script with `--verify-source` when auditing a real output folder.
+Validation performed: `pytest tests/test_export_integrity.py tests/test_io.py`; `BRAIN_ATLAS_SAMPLE_OUTPUT_DIR=/Users/ddharmap/dataProcessing/testOutput/20260311_f02_tph2_488_optb_546_gbx2_647_Stitch_preprocessed pytest tests/test_export_integrity.py`; `python scripts/diagnose_nrrd_export.py /Users/ddharmap/dataProcessing/testOutput/20260311_f02_tph2_488_optb_546_gbx2_647_Stitch_preprocessed --verify-source`.
+
+## 2026-05-15 - preprocessing speed benchmark tooling
+
+Slice goal: Measure preprocessing speed and memory tradeoffs before changing production behavior.
+Passes completed: Added raw NRRD writer controls, implemented a subprocess-isolated benchmark runner, tested synthetic smoke behavior, and ran one real-stack benchmark repeat.
+What changed: `export_preprocessed_channels` and `_write_stack_nrrd` now accept explicit NRRD encoding/compression settings. Added `scripts/benchmark_preprocess.py` with loop, batched, raw, gzip, and fused rotate/crop variants plus phase timing, output validation, output size, and peak RSS reporting.
+Rerun implications: Raw benchmark variants are much faster but write larger NRRD files; fused rotate/crop remains experimental and is rejected under bit-identical correctness.
+Validation performed: `pytest tests/test_io.py tests/test_benchmark_preprocess.py -q`; `python -m py_compile scripts/benchmark_preprocess.py`; `python scripts/benchmark_preprocess.py --repeats 1`.
+
+## 2026-05-15 - raw NRRD default export
+
+Slice goal: Use the benchmark result to speed up production preprocessing.
+Passes completed: Switched the default NRRD writer encoding from gzip to raw while preserving explicit gzip support for diagnostics and benchmarks.
+What changed: `export_preprocessed_channels` now writes uncompressed NRRD files by default. The data contract records raw encoding as canonical; gzip-specific tests opt into gzip explicitly.
+Rerun implications: New preprocessing outputs will be larger but substantially faster to write. Existing gzip-compressed output folders remain readable.
+Validation performed: `pytest tests/test_io.py tests/test_export_integrity.py tests/test_benchmark_preprocess.py -q`; `pytest -q`.

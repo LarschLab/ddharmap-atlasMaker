@@ -20,6 +20,9 @@ test = [
   "pytest>=8",
   "SimpleITK>=2.5",
 ]
+bench = [
+  "psutil>=5.9",
+]
 
 [project.scripts]
 brain-atlas-preprocess = "brain_atlas_preprocess.app:main"

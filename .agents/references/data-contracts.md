@@ -43,6 +43,7 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Manifest file name is `preprocess_manifest.json`.
 - DAPI QC image file name is `preprocess_qc_dapi_mip.png`.
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
+- NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.
 - NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` when spacings are available.
 - Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, QC image metadata, and output file list.
 

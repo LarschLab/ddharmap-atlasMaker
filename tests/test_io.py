@@ -209,6 +209,58 @@ def test_export_preprocessed_channels_writes_nrrd_with_metadata(tmp_path, monkey
     assert Path(manifest["qc"]["dapi_mip_path"]).exists()
 
 
+def test_export_preprocessed_channels_writes_raw_nrrd_by_default(tmp_path, monkeypatch):
+    nrrd = pytest.importorskip("nrrd")
+    channels = [
+        ChannelInfo(index=0, gene="gene_a", wavelength_nm=488),
+        ChannelInfo(index=1, gene="DAPI", wavelength_nm=740),
+    ]
+    metadata = StackMetadata(
+        path=str(tmp_path / "sample_gene_a_488.lsm"),
+        axes="ZCYX",
+        shape=(2, 2, 3, 4),
+        dtype="uint8",
+        channels=channels,
+    )
+    data = np.arange(2 * 2 * 3 * 4, dtype=np.uint8).reshape(metadata.shape)
+
+    class FakeSeries:
+        def asarray(self):
+            return data
+
+    class FakeTiffFile:
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.read_lsm_metadata", lambda path: metadata
+    )
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    output_dir = export_preprocessed_channels(
+        StackFileState(
+            path=metadata.path,
+            rotation_degrees=0.0,
+            crop_center_yx=(1, 2),
+        ),
+        tmp_path,
+        crop_size_px=2,
+    )
+
+    out_path = output_dir / "sample_gene_a_488_gene_a_488nm_preprocessed.nrrd"
+    exported, header = nrrd.read(str(out_path), index_order="C")
+
+    assert header["encoding"] == "raw"
+    assert exported.dtype == np.uint8
+    np.testing.assert_array_equal(exported, data[:, 0, 0:2, 1:3])
+
+
 def test_export_preprocessed_channels_writes_rotated_itk_readable_nrrd(
     tmp_path, monkeypatch
 ):

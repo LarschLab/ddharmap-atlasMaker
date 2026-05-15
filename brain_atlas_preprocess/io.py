@@ -243,6 +243,8 @@ def export_preprocessed_channels(
     interpolation: str = "linear",
     expand_canvas: bool = True,
     crop_size_px: int = 750,
+    nrrd_encoding: str = "raw",
+    nrrd_compression_level: int = 9,
 ) -> Path:
     if interpolation not in SUPPORTED_INTERPOLATION:
         raise ValueError(f"Unsupported interpolation: {interpolation}")
@@ -282,6 +284,8 @@ def export_preprocessed_channels(
             applied_rotation_degrees=applied_rotation_degrees,
             crop_center_yx=file_state.crop_center_yx,
             crop_size_px=crop_size_px,
+            encoding=nrrd_encoding,
+            compression_level=nrrd_compression_level,
         )
         output_files.append(
             {
@@ -437,13 +441,15 @@ def _write_stack_nrrd(
     applied_rotation_degrees: float,
     crop_center_yx: tuple[int, int] | None,
     crop_size_px: int,
+    encoding: str = "raw",
+    compression_level: int = 9,
 ) -> None:
     import nrrd
 
     header: dict[str, Any] = {
         "dimension": 3,
         "kinds": ["domain", "domain", "domain"],
-        "encoding": "gzip",
+        "encoding": encoding,
         "source_path": metadata.path,
         "source_name": Path(metadata.path).name,
         "source_axes": metadata.axes,
@@ -467,7 +473,13 @@ def _write_stack_nrrd(
 
     # The in-memory stack is NumPy C-order ZYX. pynrrd defaults to Fortran
     # axis order, which writes a header external tools can interpret as XYZ.
-    nrrd.write(str(path), stack, header=header, index_order="C")
+    nrrd.write(
+        str(path),
+        stack,
+        header=header,
+        index_order="C",
+        compression_level=compression_level,
+    )
 
 
 def _nrrd_space_directions_um(metadata: StackMetadata) -> list[list[float]] | None:
