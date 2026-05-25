@@ -9,7 +9,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `PROJECT_FILENAME`: canonical project JSON filename.
 - `DEFAULT_CROP_SIZE_PX`: default square crop size.
 - `ChannelInfo`: channel index, gene, wavelength, label, and JSON serialization.
-- `StackFileState`: per-source review state, rotation, crop center, channel metadata, axes, and shape.
+- `StackFileState`: per-source review state, rotation, crop center, channel metadata, selected bridge channel, axes, and shape.
 - `StackFileState.status`: file-list status authority.
 - `ProjectState`: output root, file list, interpolation/canvas/crop settings, JSON round trip.
 - `ProjectState.add_or_update_file`: canonical path-based insert/update behavior.
@@ -22,10 +22,13 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `StackMetadata`: read-only source metadata and manifest serialization.
 - `DEFAULT_TRANSFORM_WORKERS`: default CPU channel-transform worker count for exports.
 - `parse_gene_wavelength_pairs`: filename gene/wavelength parser.
-- `build_channel_mapping`: channel order and DAPI append authority.
+- `build_channel_mapping`: strict automatic channel order and DAPI append authority.
+- `build_channel_mapping_suggestions`: prefilled labels for ambiguous/manual channel mapping.
+- `validate_channel_mapping`: full channel mapping validation for manual labels.
 - `read_lsm_metadata`: LSM metadata contract and axes validation.
 - `make_file_state`: bridge from source stack to project file state.
-- `load_dapi_mip`: DAPI preview maximum-intensity projection.
+- `load_channel_mip` / `load_labeled_channel_mip`: channel preview maximum-intensity projection.
+- `load_dapi_mip`: compatibility wrapper for DAPI preview maximum-intensity projection.
 - `rotate_stack_zyx`: ZYX rotation and dtype preservation.
 - `crop_square_zyx`: square crop and zero-padding behavior.
 - `export_preprocessed_channels`: canonical export pipeline, output names, NRRD writes, and manifest.
@@ -40,7 +43,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 ## `brain_atlas_preprocess/app.py`
 
-- `PreviewWorker`: background DAPI preview loading wrapper.
+- `PreviewWorker`: background channel preview loading wrapper.
 - `PreprocessWorker`: background export wrapper.
 - `MainWindow`: UI composition and app workflow orchestration.
 - `main`: CLI entrypoint target from `pyproject.toml`.

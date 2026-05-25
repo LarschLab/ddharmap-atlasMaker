@@ -16,9 +16,13 @@ def test_project_state_round_trip(tmp_path):
                 rotation_degrees=12.5,
                 reviewed=True,
                 crop_center_yx=(123, 456),
-                channels=[ChannelInfo(index=0, gene="npy", wavelength_nm=546)],
+                channels=[
+                    ChannelInfo(index=0, gene="npy", wavelength_nm=546),
+                    ChannelInfo(index=1, gene="bridge", wavelength_nm=740),
+                ],
+                bridge_channel_index=1,
                 axes="ZCYX",
-                shape=(10, 1, 20, 30),
+                shape=(10, 2, 20, 30),
             )
         ],
     )
@@ -31,6 +35,7 @@ def test_project_state_round_trip(tmp_path):
     assert loaded.files[0].path == "/tmp/sample.lsm"
     assert loaded.files[0].rotation_degrees == 12.5
     assert loaded.files[0].crop_center_yx == (123, 456)
+    assert loaded.files[0].bridge_channel_index == 1
     assert loaded.files[0].status == "rotation_planned"
     assert loaded.files[0].channels[0].label == "npy_546nm"
 
@@ -45,6 +50,44 @@ def test_project_state_loads_legacy_crop_defaults():
 
     assert project.crop_size_px == DEFAULT_CROP_SIZE_PX
     assert project.files[0].crop_center_yx is None
+
+
+def test_project_state_loads_legacy_bridge_channel_from_dapi():
+    project = ProjectState.from_dict(
+        {
+            "output_root": "/tmp/out",
+            "files": [
+                {
+                    "path": "/tmp/sample.lsm",
+                    "channels": [
+                        {"index": 0, "gene": "npy", "wavelength_nm": 546},
+                        {"index": 1, "gene": "DAPI", "wavelength_nm": 740},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert project.files[0].bridge_channel_index == 1
+
+
+def test_project_state_loads_legacy_bridge_channel_from_last_channel():
+    project = ProjectState.from_dict(
+        {
+            "output_root": "/tmp/out",
+            "files": [
+                {
+                    "path": "/tmp/sample.lsm",
+                    "channels": [
+                        {"index": 0, "gene": "npy", "wavelength_nm": 546},
+                        {"index": 1, "gene": "bridge", "wavelength_nm": 555},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert project.files[0].bridge_channel_index == 1
 
 
 def test_file_statuses():

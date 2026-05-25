@@ -16,11 +16,11 @@ Use this file when changing app workflow, worker sequencing, preview loading, ex
    - State owner: `ProjectState.output_root` and `ProjectState.save` in `model.py`.
    - Output: `brain_atlas_preprocess_project.json` under the output root.
 
-3. Load DAPI preview.
+3. Load bridge-channel preview.
    - Orchestration owner: `PreviewWorker` and `MainWindow._start_preview_worker`.
-   - Data owner: `load_dapi_mip` in `io.py`.
+   - Data owner: channel maximum-intensity preview loading in `io.py`.
    - Rendering owner: `RotationPreview.set_image` in `widgets.py`.
-   - Output: in-memory preview cache keyed by file path.
+   - Output: in-memory preview cache keyed by file path and channel index.
 
 4. Review stack rotation and crop.
    - Interaction owner: `RotationPreview` mouse handlers and crop overlay methods.
@@ -39,7 +39,7 @@ Use this file when changing app workflow, worker sequencing, preview loading, ex
 ## Key outputs by stage
 
 - Project state: `brain_atlas_preprocess_project.json`.
-- Preview data: DAPI maximum-intensity projection, not persisted.
+- Preview data: selected bridge-channel maximum-intensity projection, with bridge channel persisted per stack.
 - Export folder: `<source_stem>_preprocessed/`.
 - Export files: `<source_stem>_<gene>_<wavelength>nm_preprocessed.nrrd`.
 - Export manifest: `preprocess_manifest.json`.

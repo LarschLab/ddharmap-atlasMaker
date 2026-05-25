@@ -16,6 +16,14 @@ Rerun implications:
 Validation performed:
 ```
 
+## 2026-05-25 - persisted bridge channel selection
+
+Slice goal: Support stacks with variable channel counts and nonstandard bridge-channel positions during review and export.
+Passes completed: Added per-stack bridge-channel state, manual channel mapping validation, explicit channel preview loading, channel/stack keyboard shortcuts, and bridge-based QC export.
+What changed: Project JSON now persists `bridge_channel_index`; ambiguous stacks can be accepted through a full channel-label dialog; preview cache keys include channel index; `a`/`d` cycle channels and `q`/`e` cycle stacks; manifest/QC metadata records the selected bridge channel.
+Rerun implications: Existing projects load with DAPI 740 as the bridge when present, otherwise the last channel. Regenerate exports when bridge-channel QC identity matters.
+Validation performed: `pytest tests/test_model.py tests/test_io.py`; `pytest`; offscreen Qt screenshot `/tmp/brain_atlas_bridge_ui.png`; local smoke against `/Users/ddharmap/dataProcessing/20260525_brainMapping_stitched`.
+
 ## 2026-05-14 - routed agent workflow bootstrap
 
 Slice goal: Add repo-specific agent routing and reference docs for the preprocessing app.

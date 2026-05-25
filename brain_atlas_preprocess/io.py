@@ -112,7 +112,89 @@ def build_channel_mapping(path: str | Path, channel_count: int) -> list[ChannelI
     return channels
 
 
-def read_lsm_metadata(path: str | Path) -> StackMetadata:
+def build_channel_mapping_suggestions(
+    path: str | Path, channel_count: int
+) -> list[ChannelInfo]:
+    try:
+        parsed_pairs = parse_gene_wavelength_pairs(path)
+    except StackFormatError:
+        parsed_pairs = {}
+    channels: list[ChannelInfo] = []
+    for wavelength in EXPECTED_GENE_WAVELENGTH_ORDER:
+        gene = parsed_pairs.get(wavelength)
+        if gene is None or len(channels) >= channel_count:
+            continue
+        channels.append(
+            ChannelInfo(
+                index=len(channels),
+                gene=gene,
+                wavelength_nm=wavelength,
+            )
+        )
+    while len(channels) < channel_count:
+        index = len(channels)
+        channels.append(
+            ChannelInfo(
+                index=index,
+                gene=(
+                    DAPI_GENE
+                    if index == channel_count - 1
+                    else f"channel_{index + 1}"
+                ),
+                wavelength_nm=(
+                    DAPI_WAVELENGTH_NM if index == channel_count - 1 else index + 1
+                ),
+            )
+        )
+    return channels
+
+
+def validate_channel_mapping(
+    channels: list[ChannelInfo],
+    channel_count: int,
+) -> list[ChannelInfo]:
+    if len(channels) != channel_count:
+        raise StackFormatError(
+            f"Expected {channel_count} channel labels, got {len(channels)}."
+        )
+    seen_indices: set[int] = set()
+    seen_output_names: set[str] = set()
+    validated: list[ChannelInfo] = []
+    for expected_index, channel in enumerate(channels):
+        if channel.index != expected_index:
+            raise StackFormatError(
+                f"Expected channel index {expected_index}, got {channel.index}."
+            )
+        if channel.index in seen_indices:
+            raise StackFormatError(f"Duplicate channel index {channel.index}.")
+        seen_indices.add(channel.index)
+        gene = channel.gene.strip()
+        if not gene:
+            raise StackFormatError(f"Channel {channel.index + 1} needs a name.")
+        if channel.wavelength_nm <= 0:
+            raise StackFormatError(
+                f"Channel {channel.index + 1} needs a positive wavelength."
+            )
+        output_name = f"{_safe_filename_part(gene)}_{channel.wavelength_nm}nm"
+        if output_name in seen_output_names:
+            raise StackFormatError(
+                f"Duplicate output channel label: {gene}_{channel.wavelength_nm}nm."
+            )
+        seen_output_names.add(output_name)
+        validated.append(
+            ChannelInfo(
+                index=channel.index,
+                gene=gene,
+                wavelength_nm=channel.wavelength_nm,
+            )
+        )
+    return validated
+
+
+def read_lsm_metadata(
+    path: str | Path,
+    channels: list[ChannelInfo] | None = None,
+) -> StackMetadata:
     source = Path(path)
     with tifffile.TiffFile(source) as tiff:
         if not tiff.is_lsm:
@@ -128,38 +210,54 @@ def read_lsm_metadata(path: str | Path) -> StackMetadata:
                 f"{source.name}"
             )
         channel_count = int(series.shape[1])
-        channels = build_channel_mapping(source, channel_count)
+        channel_mapping = (
+            validate_channel_mapping(channels, channel_count)
+            if channels is not None
+            else build_channel_mapping(source, channel_count)
+        )
         lsm_metadata = tiff.lsm_metadata or {}
         return StackMetadata(
             path=str(source.expanduser().resolve()),
             axes=series.axes,
             shape=tuple(int(dim) for dim in series.shape),
             dtype=str(series.dtype),
-            channels=channels,
+            channels=channel_mapping,
             voxel_size_x_m=_optional_float(lsm_metadata.get("VoxelSizeX")),
             voxel_size_y_m=_optional_float(lsm_metadata.get("VoxelSizeY")),
             voxel_size_z_m=_optional_float(lsm_metadata.get("VoxelSizeZ")),
         )
 
 
-def make_file_state(path: str | Path) -> StackFileState:
-    metadata = read_lsm_metadata(path)
-    return StackFileState(
+def make_file_state(
+    path: str | Path,
+    *,
+    channels: list[ChannelInfo] | None = None,
+    bridge_channel_index: int | None = None,
+) -> StackFileState:
+    metadata = read_lsm_metadata(path, channels=channels)
+    file_state = StackFileState(
         path=metadata.path,
         channels=metadata.channels,
+        bridge_channel_index=bridge_channel_index,
         axes=metadata.axes,
         shape=metadata.shape,
     )
+    file_state.bridge_channel_index = file_state.resolved_bridge_channel_index()
+    return file_state
 
 
-def load_dapi_mip(path: str | Path) -> np.ndarray:
-    metadata = read_lsm_metadata(path)
-    dapi_channel = _dapi_channel(metadata.channels)
+def load_channel_mip(path: str | Path, channel_index: int) -> np.ndarray:
+    metadata = read_unlabeled_lsm_metadata(path)
+    channel_count = int(metadata.shape[1])
+    if channel_index < 0 or channel_index >= channel_count:
+        raise StackFormatError(
+            f"Channel index {channel_index} is out of range for {Path(path).name}."
+        )
     with tifffile.TiffFile(path) as tiff:
         series = tiff.series[0]
         mip: np.ndarray | None = None
         for page in series.pages:
-            plane = page.asarray()[dapi_channel.index, :, :]
+            plane = page.asarray()[channel_index, :, :]
             if mip is None:
                 mip = plane.copy()
             else:
@@ -167,6 +265,55 @@ def load_dapi_mip(path: str | Path) -> np.ndarray:
     if mip is None:
         raise StackFormatError(f"No image planes found in {Path(path).name}.")
     return mip
+
+
+def load_labeled_channel_mip(
+    path: str | Path,
+    channels: list[ChannelInfo],
+    channel_index: int,
+) -> np.ndarray:
+    metadata = read_lsm_metadata(path, channels=channels)
+    channel_count = int(metadata.shape[1])
+    if channel_index < 0 or channel_index >= channel_count:
+        raise StackFormatError(
+            f"Channel index {channel_index} is out of range for {Path(path).name}."
+        )
+    return load_channel_mip(path, channel_index)
+
+
+def load_dapi_mip(path: str | Path) -> np.ndarray:
+    metadata = read_lsm_metadata(path)
+    dapi_channel = _dapi_channel(metadata.channels)
+    return load_channel_mip(path, dapi_channel.index)
+
+
+def read_unlabeled_lsm_metadata(path: str | Path) -> StackMetadata:
+    source = Path(path)
+    with tifffile.TiffFile(source) as tiff:
+        if not tiff.is_lsm:
+            raise StackFormatError(f"Expected a Zeiss LSM/TIFF file: {source}")
+        series = tiff.series[0]
+        if series.axes != "ZCYX":
+            raise StackFormatError(
+                f"Expected primary LSM axes ZCYX, got {series.axes}: {source.name}"
+            )
+        if len(series.shape) != 4:
+            raise StackFormatError(
+                f"Expected four-dimensional ZCYX data, got {series.shape}: "
+                f"{source.name}"
+            )
+        channel_count = int(series.shape[1])
+        lsm_metadata = tiff.lsm_metadata or {}
+        return StackMetadata(
+            path=str(source.expanduser().resolve()),
+            axes=series.axes,
+            shape=tuple(int(dim) for dim in series.shape),
+            dtype=str(series.dtype),
+            channels=build_channel_mapping_suggestions(source, channel_count),
+            voxel_size_x_m=_optional_float(lsm_metadata.get("VoxelSizeX")),
+            voxel_size_y_m=_optional_float(lsm_metadata.get("VoxelSizeY")),
+            voxel_size_z_m=_optional_float(lsm_metadata.get("VoxelSizeZ")),
+        )
 
 
 def rotate_stack_zyx(
@@ -256,7 +403,15 @@ def export_preprocessed_channels(
             f"Transform workers must be at least 1, got {transform_workers}."
         )
     source = Path(file_state.path)
-    metadata = read_lsm_metadata(source)
+    metadata = (
+        read_lsm_metadata(source, channels=file_state.channels)
+        if file_state.channels
+        else read_lsm_metadata(source)
+    )
+    bridge_index = file_state.resolved_bridge_channel_index()
+    if bridge_index is None:
+        bridge_index = _dapi_channel(metadata.channels).index
+    bridge_channel = _channel_by_index(metadata.channels, bridge_index)
     output_dir = Path(output_root) / f"{source.stem}_preprocessed"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -303,11 +458,12 @@ def export_preprocessed_channels(
                 "shape": list(cropped.shape),
             }
         )
-        if channel.gene == DAPI_GENE and channel.wavelength_nm == DAPI_WAVELENGTH_NM:
+        if channel.index == bridge_channel.index:
             qc_path = output_dir / "preprocess_qc_dapi_mip.png"
             _write_stack_mip_png(qc_path, cropped)
             qc = {
                 "dapi_mip_path": str(qc_path),
+                "bridge_channel": bridge_channel.to_dict(),
                 "rotation_degrees": file_state.rotation_degrees,
                 "applied_rotation_degrees": applied_rotation_degrees,
             }
@@ -324,6 +480,7 @@ def export_preprocessed_channels(
             if file_state.crop_center_yx is not None
             else None
         ),
+        "bridge_channel": bridge_channel.to_dict(),
         "qc": qc,
         "output_files": output_files,
     }
@@ -429,6 +586,13 @@ def _dapi_channel(channels: list[ChannelInfo]) -> ChannelInfo:
         if channel.gene == DAPI_GENE and channel.wavelength_nm == DAPI_WAVELENGTH_NM:
             return channel
     raise StackFormatError("DAPI channel was not found in channel mapping.")
+
+
+def _channel_by_index(channels: list[ChannelInfo], index: int) -> ChannelInfo:
+    for channel in channels:
+        if channel.index == index:
+            return channel
+    raise StackFormatError(f"Bridge channel index {index} was not found.")
 
 
 def _preserve_dtype(array: np.ndarray, dtype: np.dtype[Any]) -> np.ndarray:

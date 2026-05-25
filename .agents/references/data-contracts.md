@@ -11,16 +11,16 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Source shape is interpreted as `(Z, C, Y, X)`.
 - Filename gene/wavelength pairs use tokens like `<gene>_<wavelength>`.
 - Supported gene wavelengths are `546`, `488`, and `647`.
-- DAPI is appended as gene `DAPI`, wavelength `740`.
-- Expected channel order is `546`, `488`, `647`, followed by DAPI, with missing gene wavelengths filtered out.
-- Parsed channel count must match the LSM channel count.
+- Automatic channel parsing uses expected order `546`, `488`, `647`, followed by DAPI `740`, with missing gene wavelengths filtered out.
+- Parsed channel count must match the LSM channel count for automatic acceptance.
+- Ambiguous stacks may be accepted with a user-provided full channel mapping.
 
 ## Project state contract
 
 - Project state is written as `brain_atlas_preprocess_project.json` in the selected output root.
 - `ProjectState` version is currently `1`.
 - Stable fields include `output_root`, `interpolation`, `canvas_mode`, `crop_size_px`, and `files`.
-- Per-file stable fields include `path`, `rotation_degrees`, `reviewed`, `crop_center_yx`, `channels`, `axes`, and `shape`.
+- Per-file stable fields include `path`, `rotation_degrees`, `reviewed`, `crop_center_yx`, `channels`, `bridge_channel_index`, `axes`, and `shape`.
 - Crop coordinates are stored as `(y, x)` and serialized as `crop_center_yx`.
 - Default crop size is `750 px`.
 
@@ -43,10 +43,11 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Channel file name is `<source_stem>_<safe_gene>_<wavelength>nm_preprocessed.nrrd`.
 - Manifest file name is `preprocess_manifest.json`.
 - DAPI QC image file name is `preprocess_qc_dapi_mip.png`.
+- QC image generation uses the per-stack selected bridge channel.
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
 - NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.
 - NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` when spacings are available.
-- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, QC image metadata, and output file list.
+- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, selected bridge channel, QC image metadata, and output file list.
 
 ## Validation
 

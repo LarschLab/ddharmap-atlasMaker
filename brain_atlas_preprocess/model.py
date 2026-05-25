@@ -44,6 +44,7 @@ class StackFileState:
     reviewed: bool = False
     crop_center_yx: tuple[int, int] | None = None
     channels: list[ChannelInfo] = field(default_factory=list)
+    bridge_channel_index: int | None = None
     axes: str | None = None
     shape: tuple[int, ...] | None = None
 
@@ -59,6 +60,17 @@ class StackFileState:
             return "rotation_planned"
         return "reviewed_no_rotation"
 
+    def resolved_bridge_channel_index(self) -> int | None:
+        if not self.channels:
+            return None
+        channel_indices = {channel.index for channel in self.channels}
+        if self.bridge_channel_index in channel_indices:
+            return self.bridge_channel_index
+        for channel in self.channels:
+            if channel.gene == "DAPI" and channel.wavelength_nm == 740:
+                return channel.index
+        return self.channels[-1].index
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "path": self.path,
@@ -68,6 +80,7 @@ class StackFileState:
                 list(self.crop_center_yx) if self.crop_center_yx is not None else None
             ),
             "channels": [channel.to_dict() for channel in self.channels],
+            "bridge_channel_index": self.resolved_bridge_channel_index(),
             "axes": self.axes,
             "shape": list(self.shape) if self.shape is not None else None,
         }
@@ -76,7 +89,7 @@ class StackFileState:
     def from_dict(cls, data: dict[str, Any]) -> "StackFileState":
         shape = data.get("shape")
         crop_center = data.get("crop_center_yx")
-        return cls(
+        file_state = cls(
             path=str(data["path"]),
             rotation_degrees=float(data.get("rotation_degrees", 0.0)),
             reviewed=bool(data.get("reviewed", False)),
@@ -88,9 +101,16 @@ class StackFileState:
             channels=[
                 ChannelInfo.from_dict(channel) for channel in data.get("channels", [])
             ],
+            bridge_channel_index=(
+                int(data["bridge_channel_index"])
+                if data.get("bridge_channel_index") is not None
+                else None
+            ),
             axes=data.get("axes"),
             shape=tuple(shape) if shape is not None else None,
         )
+        file_state.bridge_channel_index = file_state.resolved_bridge_channel_index()
+        return file_state
 
 
 @dataclass

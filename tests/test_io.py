@@ -7,15 +7,22 @@ import numpy as np
 import pytest
 
 from brain_atlas_preprocess.io import (
+    StackFormatError,
     StackMetadata,
     build_channel_mapping,
+    build_channel_mapping_suggestions,
     crop_square_zyx,
     export_preprocessed_channels,
+    load_channel_mip,
     load_dapi_mip,
+    load_labeled_channel_mip,
+    make_file_state,
     parse_gene_wavelength_pairs,
     preview_angle_to_export_angle,
     read_lsm_metadata,
+    read_unlabeled_lsm_metadata,
     rotate_stack_zyx,
+    validate_channel_mapping,
 )
 from brain_atlas_preprocess.model import ChannelInfo, StackFileState
 
@@ -66,6 +73,30 @@ def test_channel_mapping_rejects_count_mismatch():
         build_channel_mapping(
             "20260312_f02_arxa_488_shha_546_mc4r_647_Stitch.lsm",
             channel_count=3,
+        )
+
+
+def test_channel_mapping_suggestions_fill_unexplained_channels():
+    channels = build_channel_mapping_suggestions(
+        "20260312_f02_arxa_488_Stitch.lsm",
+        channel_count=3,
+    )
+
+    assert [(c.index, c.gene, c.wavelength_nm) for c in channels] == [
+        (0, "arxa", 488),
+        (1, "channel_2", 2),
+        (2, "DAPI", 740),
+    ]
+
+
+def test_validate_channel_mapping_rejects_duplicate_output_labels():
+    with pytest.raises(ValueError, match="Duplicate output channel label"):
+        validate_channel_mapping(
+            [
+                ChannelInfo(index=0, gene="bridge", wavelength_nm=740),
+                ChannelInfo(index=1, gene="bridge", wavelength_nm=740),
+            ],
+            channel_count=2,
         )
 
 
@@ -126,6 +157,59 @@ def test_crop_square_pads_out_of_bounds_with_zero():
             dtype=np.uint8,
         ),
     )
+
+
+def test_load_channel_mip_uses_requested_channel(monkeypatch):
+    data = np.array(
+        [
+            [
+                [[1, 2], [3, 4]],
+                [[10, 1], [2, 3]],
+                [[5, 5], [5, 5]],
+            ],
+            [
+                [[9, 1], [1, 1]],
+                [[4, 11], [12, 1]],
+                [[6, 6], [6, 6]],
+            ],
+        ],
+        dtype=np.uint16,
+    )
+
+    class FakePage:
+        def __init__(self, plane):
+            self._plane = plane
+
+        def asarray(self):
+            return self._plane
+
+    class FakeSeries:
+        axes = "ZCYX"
+        shape = data.shape
+        dtype = data.dtype
+
+        @property
+        def pages(self):
+            return [FakePage(data[z]) for z in range(data.shape[0])]
+
+    class FakeTiffFile:
+        is_lsm = True
+        lsm_metadata = {}
+
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    mip = load_channel_mip("sample_bridge_555.lsm", 1)
+
+    np.testing.assert_array_equal(mip, np.array([[10, 11], [12, 3]], dtype=np.uint16))
 
 
 def test_export_preprocessed_channels_writes_nrrd_with_metadata(tmp_path, monkeypatch):
@@ -259,6 +343,78 @@ def test_export_preprocessed_channels_writes_raw_nrrd_by_default(tmp_path, monke
     assert header["encoding"] == "raw"
     assert exported.dtype == np.uint8
     np.testing.assert_array_equal(exported, data[:, 0, 0:2, 1:3])
+
+
+def test_export_preprocessed_channels_uses_selected_bridge_for_qc(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("nrrd")
+    channels = [
+        ChannelInfo(index=0, gene="bridge", wavelength_nm=555),
+        ChannelInfo(index=1, gene="DAPI", wavelength_nm=740),
+    ]
+    metadata = StackMetadata(
+        path=str(tmp_path / "sample_bridge_555.lsm"),
+        axes="ZCYX",
+        shape=(2, 2, 3, 3),
+        dtype="uint8",
+        channels=channels,
+    )
+    data = np.zeros(metadata.shape, dtype=np.uint8)
+    data[:, 0, :, :] = np.array(
+        [
+            [[0, 10, 20], [30, 40, 50], [60, 70, 80]],
+            [[90, 100, 110], [120, 130, 140], [150, 160, 170]],
+        ],
+        dtype=np.uint8,
+    )
+    data[:, 1, :, :] = 1
+
+    class FakeSeries:
+        def asarray(self):
+            return data
+
+    class FakeTiffFile:
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    def fake_read_lsm_metadata(path, *, channels=None):
+        return StackMetadata(
+            path=metadata.path,
+            axes=metadata.axes,
+            shape=metadata.shape,
+            dtype=metadata.dtype,
+            channels=channels or metadata.channels,
+        )
+
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.read_lsm_metadata", fake_read_lsm_metadata
+    )
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    output_dir = export_preprocessed_channels(
+        StackFileState(
+            path=metadata.path,
+            channels=channels,
+            bridge_channel_index=0,
+            rotation_degrees=0.0,
+            crop_center_yx=(1, 1),
+        ),
+        tmp_path,
+        crop_size_px=3,
+    )
+
+    manifest = json.loads((output_dir / "preprocess_manifest.json").read_text())
+    assert manifest["bridge_channel"] == channels[0].to_dict()
+    assert manifest["qc"]["bridge_channel"] == channels[0].to_dict()
+    qc_image = _read_grayscale_png(Path(manifest["qc"]["dapi_mip_path"]))
+    assert qc_image.max() > qc_image.min()
 
 
 def test_export_preprocessed_channels_threaded_matches_single_worker(
@@ -451,6 +607,42 @@ def test_optional_sample_smoke():
     assert metadata.shape[1] == 4
     assert len(metadata.channels) == 4
     assert mip.shape == metadata.shape[-2:]
+
+
+def test_optional_20260525_mismatched_stack_directory_smoke():
+    root = Path("/Users/ddharmap/dataProcessing/20260525_brainMapping_stitched")
+    if not root.exists():
+        pytest.skip("Local 20260525 stitched stack directory is not available.")
+
+    paths = sorted(root.glob("*.lsm"))
+    assert paths
+    auto_count = 0
+    manual_count = 0
+    for path in paths:
+        try:
+            file_state = make_file_state(path)
+            auto_count += 1
+        except StackFormatError:
+            metadata = read_unlabeled_lsm_metadata(path)
+            channels = build_channel_mapping_suggestions(path, int(metadata.shape[1]))
+            file_state = make_file_state(
+                path,
+                channels=channels,
+                bridge_channel_index=channels[-1].index,
+            )
+            manual_count += 1
+
+        bridge_index = file_state.resolved_bridge_channel_index()
+        assert bridge_index is not None
+        mip = load_labeled_channel_mip(
+            file_state.path,
+            file_state.channels,
+            bridge_index,
+        )
+        assert mip.shape == file_state.shape[-2:]
+
+    assert auto_count > 0
+    assert manual_count > 0
 
 
 def _read_grayscale_png(path: Path) -> np.ndarray:
