@@ -16,6 +16,14 @@ Rerun implications:
 Validation performed:
 ```
 
+## 2026-05-26 - fluorescence preview LUTs
+
+Slice goal: Tint single-channel previews with expected fluorescence colors instead of showing every channel in grayscale.
+Passes completed: Added wavelength-aware preview pixmap rendering and threaded the selected channel wavelength through main previews and channel-mapping thumbnails.
+What changed: `488 nm` previews render green, `546 nm` previews render yellow, and `647 nm` previews render red; other wavelengths remain grayscale. The change is display-only and does not alter loaded arrays, exports, project state, or channel ordering.
+Rerun implications: Existing projects open normally; previews now use fluorescence colors when channel wavelengths are known.
+Validation performed: `QT_QPA_PLATFORM=offscreen pytest tests/test_widgets.py -q`; `pytest tests/test_io.py tests/test_model.py -q`; rendered `/tmp/brain_atlas_lut_546.png` and `/tmp/brain_atlas_lut_647.png` from `/Users/ddharmap/dataProcessing/20260525_brainMapping_stitched/20260320_f02_cort_546_gad2_647_Stitch.lsm`.
+
 ## 2026-05-26 - NRRD microns unit token
 
 Slice goal: Make preprocessed NRRD spacing metadata compatible with registration tools that distinguish `um` from `microns`.

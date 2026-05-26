@@ -151,7 +151,10 @@ class ChannelMappingDialog(QDialog):
             row.addWidget(QLabel(f"Channel {channel.index + 1}"))
 
             preview = ChannelThumbnail()
-            preview.set_image(self._preview_images.get(channel.index))
+            preview.set_image(
+                self._preview_images.get(channel.index),
+                channel.wavelength_nm,
+            )
             row.addWidget(preview)
 
             name_input = QLineEdit(channel.gene)
@@ -162,6 +165,7 @@ class ChannelMappingDialog(QDialog):
             wavelength_input.setRange(1, 100000)
             wavelength_input.setValue(channel.wavelength_nm)
             wavelength_input.setSuffix(" nm")
+            wavelength_input.valueChanged.connect(preview.set_wavelength)
             row.addWidget(wavelength_input)
             self._wavelength_inputs.append(wavelength_input)
 
@@ -445,7 +449,10 @@ class MainWindow(QMainWindow):
             return
         cache_key = (path, channel_index)
         if cache_key in self.preview_cache:
-            self.preview.set_image(self.preview_cache[cache_key])
+            self.preview.set_image(
+                self.preview_cache[cache_key],
+                self._channel_wavelength(channel_index),
+            )
             return
         self.statusBar().showMessage(
             f"Loading channel {channel_index + 1} preview: {Path(path).name}"
@@ -502,7 +509,7 @@ class MainWindow(QMainWindow):
             and self.current_file.path == path
             and self.current_file.resolved_bridge_channel_index() == channel_index
         ):
-            self.preview.set_image(image)
+            self.preview.set_image(image, self._channel_wavelength(channel_index))
         self.statusBar().showMessage("Preview loaded", 2500)
 
     @Slot(str, int, str)
@@ -560,7 +567,10 @@ class MainWindow(QMainWindow):
             return
         cache_key = (path, channel_index)
         if cache_key in self.preview_cache:
-            self.preview.set_image(self.preview_cache[cache_key])
+            self.preview.set_image(
+                self.preview_cache[cache_key],
+                self._channel_wavelength(channel_index),
+            )
             return
         self._start_preview_worker(path, channel_index)
 
@@ -616,6 +626,14 @@ class MainWindow(QMainWindow):
             f"Channel: {channel.index + 1}/{len(self.current_file.channels)} "
             f"{channel.label}"
         )
+
+    def _channel_wavelength(self, channel_index: int) -> int | None:
+        if self.current_file is None:
+            return None
+        for channel in self.current_file.channels:
+            if channel.index == channel_index:
+                return channel.wavelength_nm
+        return None
 
     def _reset_rotation(self) -> None:
         if self.current_file is None:

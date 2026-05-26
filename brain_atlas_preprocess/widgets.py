@@ -18,6 +18,12 @@ STATUS_COLORS = {
     "rotation_planned": QColor("#dce7ff"),
 }
 
+PREVIEW_LUTS = {
+    488: (0, 255, 0),
+    546: (255, 255, 0),
+    647: (255, 0, 0),
+}
+
 
 class StackFileList(QListWidget):
     def set_files(self, files: list[StackFileState]) -> None:
@@ -49,13 +55,31 @@ class StackFileList(QListWidget):
 class ChannelThumbnail(QWidget):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
+        self._image: np.ndarray | None = None
+        self._wavelength_nm: int | None = None
         self._pixmap: QPixmap | None = None
         self._message = "Preview unavailable"
         self.setFixedSize(140, 110)
 
-    def set_image(self, image: np.ndarray | None) -> None:
-        self._pixmap = None if image is None else _array_to_pixmap(image)
+    def set_image(
+        self, image: np.ndarray | None, wavelength_nm: int | None = None
+    ) -> None:
+        self._image = image
+        self._wavelength_nm = wavelength_nm
+        self._refresh_pixmap()
         self.update()
+
+    def set_wavelength(self, wavelength_nm: int | None) -> None:
+        self._wavelength_nm = wavelength_nm
+        self._refresh_pixmap()
+        self.update()
+
+    def _refresh_pixmap(self) -> None:
+        self._pixmap = (
+            None
+            if self._image is None
+            else _array_to_pixmap(self._image, self._wavelength_nm)
+        )
 
     def set_message(self, message: str) -> None:
         self._message = message
@@ -99,8 +123,12 @@ class RotationPreview(QWidget):
         self.setMinimumSize(520, 520)
         self.setMouseTracking(True)
 
-    def set_image(self, image: np.ndarray | None) -> None:
-        self._pixmap = None if image is None else _array_to_pixmap(image)
+    def set_image(
+        self, image: np.ndarray | None, wavelength_nm: int | None = None
+    ) -> None:
+        self._pixmap = (
+            None if image is None else _array_to_pixmap(image, wavelength_nm)
+        )
         self.update()
 
     def set_angle(self, angle: float) -> None:
@@ -259,7 +287,17 @@ def _rotated_shape_yx(height: int, width: int, angle_degrees: float) -> tuple[in
     return max(1, rotated_height), max(1, rotated_width)
 
 
-def _array_to_pixmap(image: np.ndarray) -> QPixmap:
+def _array_to_pixmap(
+    image: np.ndarray, wavelength_nm: int | None = None
+) -> QPixmap:
+    normalized = _normalize_preview_image(image)
+    lut_color = PREVIEW_LUTS.get(wavelength_nm)
+    if lut_color is None:
+        return _grayscale_pixmap(normalized)
+    return _lut_pixmap(normalized, lut_color)
+
+
+def _normalize_preview_image(image: np.ndarray) -> np.ndarray:
     array = np.asarray(image)
     if array.ndim != 2:
         raise ValueError(f"Expected 2-D preview image, got {array.shape}.")
@@ -273,6 +311,10 @@ def _array_to_pixmap(image: np.ndarray) -> QPixmap:
     else:
         normalized = np.clip((finite - low) / (high - low), 0, 1)
         normalized = (normalized * 255).astype(np.uint8)
+    return normalized
+
+
+def _grayscale_pixmap(normalized: np.ndarray) -> QPixmap:
     height, width = normalized.shape
     contiguous = np.ascontiguousarray(normalized)
     image_qt = QImage(
@@ -281,5 +323,23 @@ def _array_to_pixmap(image: np.ndarray) -> QPixmap:
         height,
         contiguous.strides[0],
         QImage.Format.Format_Grayscale8,
+    ).copy()
+    return QPixmap.fromImage(image_qt)
+
+
+def _lut_pixmap(normalized: np.ndarray, color: tuple[int, int, int]) -> QPixmap:
+    height, width = normalized.shape
+    rgb = np.empty((height, width, 3), dtype=np.uint8)
+    for channel, value in enumerate(color):
+        rgb[:, :, channel] = ((normalized.astype(np.uint16) * value) // 255).astype(
+            np.uint8
+        )
+    contiguous = np.ascontiguousarray(rgb)
+    image_qt = QImage(
+        contiguous.data,
+        width,
+        height,
+        contiguous.strides[0],
+        QImage.Format.Format_RGB888,
     ).copy()
     return QPixmap.fromImage(image_qt)
