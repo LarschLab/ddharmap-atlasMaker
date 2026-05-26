@@ -46,6 +46,44 @@ class StackFileList(QListWidget):
         item.setText(f"{file_state.name}  [{suffix}]")
 
 
+class ChannelThumbnail(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._pixmap: QPixmap | None = None
+        self._message = "Preview unavailable"
+        self.setFixedSize(140, 110)
+
+    def set_image(self, image: np.ndarray | None) -> None:
+        self._pixmap = None if image is None else _array_to_pixmap(image)
+        self.update()
+
+    def set_message(self, message: str) -> None:
+        self._message = message
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#15171a"))
+        if self._pixmap is None:
+            painter.setPen(QPen(QColor("#c8ced8")))
+            painter.drawText(
+                self.rect().adjusted(8, 8, -8, -8),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                self._message,
+            )
+            return
+
+        available = self.rect().adjusted(4, 4, -4, -4)
+        scaled = self._pixmap.scaled(
+            available.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        target_x = available.center().x() - scaled.width() // 2
+        target_y = available.center().y() - scaled.height() // 2
+        painter.drawPixmap(target_x, target_y, scaled)
+
+
 class RotationPreview(QWidget):
     angleChanged = Signal(float)
     cropCenterChanged = Signal(object)

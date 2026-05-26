@@ -27,7 +27,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `validate_channel_mapping`: full channel mapping validation for manual labels.
 - `read_lsm_metadata`: LSM metadata contract and axes validation.
 - `make_file_state`: bridge from source stack to project file state.
-- `load_channel_mip` / `load_labeled_channel_mip`: channel preview maximum-intensity projection.
+- `load_channel_mip` / `load_channel_mips` / `load_labeled_channel_mip`: channel preview maximum-intensity projection.
 - `load_dapi_mip`: compatibility wrapper for DAPI preview maximum-intensity projection.
 - `rotate_stack_zyx`: ZYX rotation and dtype preservation.
 - `crop_square_zyx`: square crop and zero-padding behavior.
@@ -37,6 +37,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 ## `brain_atlas_preprocess/widgets.py`
 
 - `StackFileList`: list rendering and status color/text application.
+- `ChannelThumbnail`: compact non-interactive channel preview for mapping dialogs.
 - `RotationPreview`: preview rendering, angle updates, crop overlay, and mouse interactions.
 - `_rotated_shape_yx`: pure geometry helper used by crop overlay and coordinate mapping.
 - `_array_to_pixmap`: preview intensity normalization and grayscale pixmap conversion.

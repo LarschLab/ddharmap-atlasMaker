@@ -247,24 +247,47 @@ def make_file_state(
 
 
 def load_channel_mip(path: str | Path, channel_index: int) -> np.ndarray:
+    return load_channel_mips(path, [channel_index])[channel_index]
+
+
+def load_channel_mips(
+    path: str | Path,
+    channel_indices: list[int] | None = None,
+) -> dict[int, np.ndarray]:
     metadata = read_unlabeled_lsm_metadata(path)
     channel_count = int(metadata.shape[1])
-    if channel_index < 0 or channel_index >= channel_count:
-        raise StackFormatError(
-            f"Channel index {channel_index} is out of range for {Path(path).name}."
-        )
+    if channel_indices is None:
+        requested = list(range(channel_count))
+    else:
+        requested = list(channel_indices)
+    for channel_index in requested:
+        if channel_index < 0 or channel_index >= channel_count:
+            raise StackFormatError(
+                f"Channel index {channel_index} is out of range for {Path(path).name}."
+            )
+    requested_set = set(requested)
+    if not requested_set:
+        return {}
+    mips: dict[int, np.ndarray] = {}
     with tifffile.TiffFile(path) as tiff:
         series = tiff.series[0]
-        mip: np.ndarray | None = None
         for page in series.pages:
-            plane = page.asarray()[channel_index, :, :]
-            if mip is None:
-                mip = plane.copy()
-            else:
-                np.maximum(mip, plane, out=mip)
-    if mip is None:
-        raise StackFormatError(f"No image planes found in {Path(path).name}.")
-    return mip
+            plane = page.asarray()
+            for channel_index in requested:
+                channel_plane = plane[channel_index, :, :]
+                if channel_index not in mips:
+                    mips[channel_index] = channel_plane.copy()
+                else:
+                    np.maximum(
+                        mips[channel_index],
+                        channel_plane,
+                        out=mips[channel_index],
+                    )
+    if len(mips) != len(requested_set):
+        raise StackFormatError(
+            f"No image planes found in {Path(path).name}."
+        )
+    return mips
 
 
 def load_labeled_channel_mip(

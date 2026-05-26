@@ -9,7 +9,7 @@ Use this file when changing app workflow, worker sequencing, preview loading, ex
 1. Select input stacks.
    - UI owner: `MainWindow._add_files` in `brain_atlas_preprocess/app.py`.
    - Data owner: `make_file_state`, `read_lsm_metadata`, `build_channel_mapping` in `brain_atlas_preprocess/io.py`.
-   - Output: `StackFileState` entries added to `ProjectState.files`.
+   - Output: `StackFileState` entries added to `ProjectState.files`; ambiguous stacks open a channel mapping dialog with per-channel previews.
 
 2. Select output root.
    - UI owner: `MainWindow._select_output_root`.

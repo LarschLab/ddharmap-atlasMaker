@@ -35,6 +35,7 @@ from brain_atlas_preprocess.io import (
     StackFormatError,
     build_channel_mapping_suggestions,
     export_preprocessed_channels,
+    load_channel_mips,
     load_labeled_channel_mip,
     make_file_state,
     read_unlabeled_lsm_metadata,
@@ -46,7 +47,7 @@ from brain_atlas_preprocess.model import (
     ProjectState,
     StackFileState,
 )
-from brain_atlas_preprocess.widgets import RotationPreview, StackFileList
+from brain_atlas_preprocess.widgets import ChannelThumbnail, RotationPreview, StackFileList
 
 
 class PreviewWorker(QObject):
@@ -120,6 +121,7 @@ class ChannelMappingDialog(QDialog):
         path: str,
         channels: list[ChannelInfo],
         bridge_channel_index: int | None,
+        preview_images: dict[int, object] | None = None,
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -128,6 +130,7 @@ class ChannelMappingDialog(QDialog):
         self._wavelength_inputs: list[QSpinBox] = []
         self._bridge_group = QButtonGroup(self)
         self._bridge_group.setExclusive(True)
+        self._preview_images = preview_images or {}
         self.channels: list[ChannelInfo] = []
         self.bridge_channel_index: int | None = None
 
@@ -146,6 +149,10 @@ class ChannelMappingDialog(QDialog):
         for channel in channels:
             row = QHBoxLayout()
             row.addWidget(QLabel(f"Channel {channel.index + 1}"))
+
+            preview = ChannelThumbnail()
+            preview.set_image(self._preview_images.get(channel.index))
+            row.addWidget(preview)
 
             name_input = QLineEdit(channel.gene)
             row.addWidget(name_input, stretch=1)
@@ -355,12 +362,22 @@ class MainWindow(QMainWindow):
         channels = existing.channels if existing is not None else metadata.channels
         if len(channels) != int(metadata.shape[1]):
             channels = build_channel_mapping_suggestions(path, int(metadata.shape[1]))
+        try:
+            preview_images = load_channel_mips(path)
+        except Exception:
+            preview_images = {}
         bridge_index = (
             existing.resolved_bridge_channel_index()
             if existing is not None
             else metadata.channels[-1].index
         )
-        dialog = ChannelMappingDialog(path, channels, bridge_index, self)
+        dialog = ChannelMappingDialog(
+            path,
+            channels,
+            bridge_index,
+            preview_images=preview_images,
+            parent=self,
+        )
         if dialog.exec() != QDialog.DialogCode.Accepted:
             return None
         return make_file_state(

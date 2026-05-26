@@ -24,6 +24,14 @@ What changed: Project JSON now persists `bridge_channel_index`; ambiguous stacks
 Rerun implications: Existing projects load with DAPI 740 as the bridge when present, otherwise the last channel. Regenerate exports when bridge-channel QC identity matters.
 Validation performed: `pytest tests/test_model.py tests/test_io.py`; `pytest`; offscreen Qt screenshot `/tmp/brain_atlas_bridge_ui.png`; local smoke against `/Users/ddharmap/dataProcessing/20260525_brainMapping_stitched`.
 
+## 2026-05-25 - channel mapping dialog previews
+
+Slice goal: Make manual channel mapping usable by showing the image content for each channel being labeled.
+Passes completed: Added one-pass all-channel MIP loading, a compact thumbnail widget, and inline channel thumbnails in the mapping dialog.
+What changed: `ChannelMappingDialog` now shows one preview thumbnail per channel row while preserving editable gene/wavelength fields and bridge selection.
+Rerun implications: Manual channel mapping opens after loading per-channel MIPs; if preview loading fails, labels can still be edited with placeholder thumbnails.
+Validation performed: `pytest tests/test_io.py tests/test_model.py`; offscreen Qt screenshot `/tmp/brain_atlas_channel_mapping_dialog.png`.
+
 ## 2026-05-14 - routed agent workflow bootstrap
 
 Slice goal: Add repo-specific agent routing and reference docs for the preprocessing app.

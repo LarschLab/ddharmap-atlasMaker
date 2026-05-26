@@ -14,6 +14,7 @@ from brain_atlas_preprocess.io import (
     crop_square_zyx,
     export_preprocessed_channels,
     load_channel_mip,
+    load_channel_mips,
     load_dapi_mip,
     load_labeled_channel_mip,
     make_file_state,
@@ -210,6 +211,62 @@ def test_load_channel_mip_uses_requested_channel(monkeypatch):
     mip = load_channel_mip("sample_bridge_555.lsm", 1)
 
     np.testing.assert_array_equal(mip, np.array([[10, 11], [12, 3]], dtype=np.uint16))
+
+
+def test_load_channel_mips_loads_all_channels_in_one_result(monkeypatch):
+    data = np.array(
+        [
+            [
+                [[1, 2], [3, 4]],
+                [[10, 1], [2, 3]],
+                [[5, 5], [5, 5]],
+            ],
+            [
+                [[9, 1], [1, 1]],
+                [[4, 11], [12, 1]],
+                [[6, 7], [8, 9]],
+            ],
+        ],
+        dtype=np.uint16,
+    )
+
+    class FakePage:
+        def __init__(self, plane):
+            self._plane = plane
+
+        def asarray(self):
+            return self._plane
+
+    class FakeSeries:
+        axes = "ZCYX"
+        shape = data.shape
+        dtype = data.dtype
+
+        @property
+        def pages(self):
+            return [FakePage(data[z]) for z in range(data.shape[0])]
+
+    class FakeTiffFile:
+        is_lsm = True
+        lsm_metadata = {}
+
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    mips = load_channel_mips("sample_bridge_555.lsm")
+
+    assert sorted(mips) == [0, 1, 2]
+    np.testing.assert_array_equal(mips[0], np.array([[9, 2], [3, 4]], dtype=np.uint16))
+    np.testing.assert_array_equal(mips[1], np.array([[10, 11], [12, 3]], dtype=np.uint16))
+    np.testing.assert_array_equal(mips[2], np.array([[6, 7], [8, 9]], dtype=np.uint16))
 
 
 def test_export_preprocessed_channels_writes_nrrd_with_metadata(tmp_path, monkeypatch):
@@ -634,6 +691,10 @@ def test_optional_20260525_mismatched_stack_directory_smoke():
 
         bridge_index = file_state.resolved_bridge_channel_index()
         assert bridge_index is not None
+        mips = load_channel_mips(file_state.path)
+        assert sorted(mips) == [channel.index for channel in file_state.channels]
+        for channel in file_state.channels:
+            assert mips[channel.index].shape == file_state.shape[-2:]
         mip = load_labeled_channel_mip(
             file_state.path,
             file_state.channels,
