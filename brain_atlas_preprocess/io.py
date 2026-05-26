@@ -22,6 +22,7 @@ DAPI_WAVELENGTH_NM = 740
 DAPI_GENE = "DAPI"
 SUPPORTED_INTERPOLATION = {"nearest": 0, "linear": 1, "cubic": 3}
 DEFAULT_TRANSFORM_WORKERS = 4
+NRRD_SPACE_UNIT = "microns"
 
 
 class StackFormatError(ValueError):
@@ -729,11 +730,11 @@ def _write_stack_nrrd(
         "crop_center_yx": json.dumps(list(crop_center_yx) if crop_center_yx else None),
         "labels": ["x", "y", "z"],
     }
-    space_directions_um = _nrrd_space_directions_um(metadata)
-    if space_directions_um is not None:
+    space_directions_microns = _nrrd_space_directions_microns(metadata)
+    if space_directions_microns is not None:
         header["space dimension"] = 3
-        header["space directions"] = space_directions_um
-        header["space units"] = ["um", "um", "um"]
+        header["space directions"] = space_directions_microns
+        header["space units"] = [NRRD_SPACE_UNIT, NRRD_SPACE_UNIT, NRRD_SPACE_UNIT]
 
     # The in-memory stack is NumPy C-order ZYX. pynrrd defaults to Fortran
     # axis order, which writes a header external tools can interpret as XYZ.
@@ -746,7 +747,9 @@ def _write_stack_nrrd(
     )
 
 
-def _nrrd_space_directions_um(metadata: StackMetadata) -> list[list[float]] | None:
+def _nrrd_space_directions_microns(
+    metadata: StackMetadata,
+) -> list[list[float]] | None:
     if not (
         metadata.voxel_size_z_m
         and metadata.voxel_size_y_m

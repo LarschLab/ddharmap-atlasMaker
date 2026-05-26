@@ -340,7 +340,7 @@ def test_export_preprocessed_channels_writes_nrrd_with_metadata(tmp_path, monkey
             ]
         ),
     )
-    assert header["space units"] == ["um", "um", "um"]
+    assert header["space units"] == ["microns", "microns", "microns"]
     manifest = json.loads((output_dir / "preprocess_manifest.json").read_text())
     assert manifest["rotation_degrees"] == 0.0
     assert manifest["applied_rotation_degrees"] == -0.0

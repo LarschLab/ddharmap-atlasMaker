@@ -16,6 +16,14 @@ Rerun implications:
 Validation performed:
 ```
 
+## 2026-05-26 - NRRD microns unit token
+
+Slice goal: Make preprocessed NRRD spacing metadata compatible with registration tools that distinguish `um` from `microns`.
+Passes completed: Changed the exporter space-unit token and added a repair utility for existing output folders.
+What changed: NRRD exports now write `space units` as `microns` while preserving micrometer-scale `space directions`. Added `scripts/repair_nrrd_space_units.py` to rewrite existing NRRD headers in place without recomputing image data.
+Rerun implications: New GUI exports use `microns`; existing preprocessed folders can be repaired with the script or regenerated.
+Validation performed: `python -m py_compile scripts/repair_nrrd_space_units.py`; `pytest tests/test_io.py tests/test_repair_nrrd_space_units.py -q`; `pytest -q`; temporary-copy repair validation against `/Users/ddharmap/dataProcessing/20260525_brainMapping_preprocessed/20260320_f01_cort_546_gad2_647_Stitch_preprocessed`.
+
 ## 2026-05-25 - persisted bridge channel selection
 
 Slice goal: Support stacks with variable channel counts and nonstandard bridge-channel positions during review and export.

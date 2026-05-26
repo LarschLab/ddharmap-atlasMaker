@@ -46,7 +46,7 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - QC image generation uses the per-stack selected bridge channel.
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
 - NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.
-- NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` when spacings are available.
+- NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` with `microns` space units when spacings are available.
 - Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, selected bridge channel, QC image metadata, and output file list.
 
 ## Validation
