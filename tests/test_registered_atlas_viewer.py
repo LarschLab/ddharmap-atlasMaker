@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import struct
+
+import numpy as np
+
+from scripts.registered_atlas_viewer import (
+    MARKER_PALETTE,
+    assign_marker_colors,
+    composite_rgb,
+    encode_png_rgb,
+    normalize_plane,
+    orient_volume_for_display,
+    plane_slice,
+)
+
+
+def test_plane_slice_uses_zyx_volume_coordinates():
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    np.testing.assert_array_equal(plane_slice(volume, "axial", 1), volume[1, :, :])
+    np.testing.assert_array_equal(plane_slice(volume, "sagittal", 2), volume[:, :, 2])
+    np.testing.assert_array_equal(plane_slice(volume, "coronal", 1), volume[:, 1, :])
+
+
+def test_plane_slice_mip_matches_plane_axis():
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    np.testing.assert_array_equal(plane_slice(volume, "axial", "mip"), volume.max(axis=0))
+    np.testing.assert_array_equal(
+        plane_slice(volume, "sagittal", "mip"), volume.max(axis=2)
+    )
+    np.testing.assert_array_equal(
+        plane_slice(volume, "coronal", "mip"), volume.max(axis=1)
+    )
+
+
+def test_orient_volume_for_display_flips_z_axis():
+    volume = np.arange(2 * 3 * 4, dtype=np.float32).reshape(2, 3, 4)
+
+    oriented = orient_volume_for_display(volume)
+
+    np.testing.assert_array_equal(oriented[0], volume[1])
+    np.testing.assert_array_equal(oriented[1], volume[0])
+
+
+def test_assign_marker_colors_uses_marker_palette_not_wavelengths():
+    colors = assign_marker_colors(["agrp", "pomca", "gad1b", "cort"])
+
+    assert colors == {
+        "agrp": MARKER_PALETTE[0],
+        "cort": MARKER_PALETTE[1],
+        "gad1b": MARKER_PALETTE[2],
+        "pomca": MARKER_PALETTE[3],
+    }
+    assert len(set(colors.values())) == 4
+
+
+def test_normalize_plane_applies_clip_brightness_and_contrast():
+    plane = np.array([[0, 128, 255]], dtype=np.float32)
+
+    normalized = normalize_plane(plane, brightness=100, contrast=100)
+
+    assert normalized[0, 0] == 0
+    assert 0.49 < normalized[0, 1] < 0.51
+    assert normalized[0, 2] == 1
+
+
+def test_composite_rgb_returns_uint8_rgb_image():
+    volume = np.zeros((2, 3, 4), dtype=np.float32)
+    volume[:, :, 2] = 255
+
+    image = composite_rgb(
+        [(volume, "#ff0000")],
+        "sagittal",
+        2,
+        brightness=100,
+        contrast=100,
+        opacity=1,
+    )
+
+    assert image.shape == (2, 3, 3)
+    assert image.dtype == np.uint8
+    assert image[:, :, 0].max() == 255
+    assert image[:, :, 1].max() == 0
+    assert image[:, :, 2].max() == 0
+
+
+def test_composite_rgb_keeps_reference_visible_without_marker_layers():
+    reference = np.zeros((2, 3, 4), dtype=np.float32)
+    reference[1, :, :] = 255
+
+    image = composite_rgb(
+        [],
+        "axial",
+        1,
+        brightness=100,
+        contrast=100,
+        opacity=1,
+        reference_volume=reference,
+    )
+
+    assert image.shape == (3, 4, 3)
+    assert image.dtype == np.uint8
+    assert image[:, :, 0].max() > 0
+    np.testing.assert_array_equal(image[:, :, 0], image[:, :, 1])
+    np.testing.assert_array_equal(image[:, :, 1], image[:, :, 2])
+
+
+def test_encode_png_rgb_writes_png_dimensions():
+    image = np.zeros((3, 5, 3), dtype=np.uint8)
+
+    payload = encode_png_rgb(image)
+
+    assert payload.startswith(b"\x89PNG\r\n\x1a\n")
+    width, height = struct.unpack(">II", payload[16:24])
+    assert (width, height) == (5, 3)

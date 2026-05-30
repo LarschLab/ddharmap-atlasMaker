@@ -16,6 +16,14 @@ Rerun implications:
 Validation performed:
 ```
 
+## 2026-05-30 - registered atlas viewer marker colors
+
+Slice goal: Improve the registered atlas viewer so markers sharing acquisition wavelengths remain visually distinguishable, and correct inverted Z display orientation.
+Passes completed: Added marker-level palette assignment, increased the default simultaneous layer cap to the 24-marker palette, flipped loaded NRRD volumes along Z for display, and tightened small sidebar layout issues found during browser QA.
+What changed: `scripts/registered_atlas_viewer.py` now colors by marker instead of wavelength, exposes the layer display cap in metadata/status text, applies the same Z flip to marker volumes and the fixed DAPI reference, and uses a shorter search placeholder with taller layer rows.
+Rerun implications: Restart the viewer process to pick up the new palette and orientation; no registered NRRD files or manifests need regeneration.
+Validation performed: `pytest tests/test_registered_atlas_viewer.py`; `python3 -m py_compile scripts/registered_atlas_viewer.py`; `pytest`; in-app browser smoke at `http://127.0.0.1:8765/` selecting eight markers, toggling MIP/slice views, and clicking the axial canvas.
+
 ## 2026-05-26 - fluorescence preview LUTs
 
 Slice goal: Tint single-channel previews with expected fluorescence colors instead of showing every channel in grayscale.
