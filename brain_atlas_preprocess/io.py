@@ -23,6 +23,7 @@ DAPI_GENE = "DAPI"
 SUPPORTED_INTERPOLATION = {"nearest": 0, "linear": 1, "cubic": 3}
 DEFAULT_TRANSFORM_WORKERS = 4
 NRRD_SPACE_UNIT = "microns"
+INFERRED_WAVELENGTHS_NM = {488, 546, 647, DAPI_WAVELENGTH_NM}
 
 
 class StackFormatError(ValueError):
@@ -39,6 +40,8 @@ class StackMetadata:
     voxel_size_x_m: float | None = None
     voxel_size_y_m: float | None = None
     voxel_size_z_m: float | None = None
+    channel_mapping_requires_confirmation: bool = False
+    channel_mapping_messages: tuple[str, ...] = ()
 
     def to_manifest_dict(self) -> dict[str, Any]:
         return {
@@ -55,6 +58,13 @@ class StackMetadata:
         }
 
 
+@dataclass(frozen=True)
+class ChannelMappingInference:
+    channels: list[ChannelInfo]
+    requires_confirmation: bool = False
+    messages: tuple[str, ...] = ()
+
+
 def parse_gene_wavelength_pairs(path: str | Path) -> dict[int, str]:
     """Parse gene/wavelength pairs from a stack filename.
 
@@ -67,15 +77,9 @@ def parse_gene_wavelength_pairs(path: str | Path) -> dict[int, str]:
     stem = Path(path).stem
     tokens = stem.split("_")
     pairs: dict[int, str] = {}
-    for index, token in enumerate(tokens):
-        if not token.isdigit():
-            continue
-        wavelength = int(token)
+    for index, wavelength, gene in _filename_channel_label_segments(tokens):
         if wavelength not in EXPECTED_GENE_WAVELENGTH_ORDER:
             continue
-        if index == 0:
-            raise StackFormatError(f"Missing gene name before wavelength {wavelength}.")
-        gene = tokens[index - 1].strip()
         if not gene:
             raise StackFormatError(f"Missing gene name before wavelength {wavelength}.")
         pairs[wavelength] = gene
@@ -111,6 +115,97 @@ def build_channel_mapping(path: str | Path, channel_count: int) -> list[ChannelI
             f"{channel_count} channels: {Path(path).name}. Parsed: {labels}"
         )
     return channels
+
+
+def infer_channel_mapping(
+    path: str | Path,
+    channel_count: int,
+    lsm_metadata: dict[str, Any],
+) -> ChannelMappingInference:
+    metadata_wavelengths = _infer_metadata_channel_wavelengths(
+        channel_count,
+        lsm_metadata,
+    )
+    if metadata_wavelengths is None:
+        return ChannelMappingInference(
+            channels=build_channel_mapping_suggestions(path, channel_count),
+            requires_confirmation=True,
+            messages=("LSM channel wavelength metadata was incomplete.",),
+        )
+
+    filename_labels = _parse_filename_channel_labels(path)
+    filename_genes_by_order = [
+        gene for wavelength, gene in filename_labels.items()
+        if wavelength != DAPI_WAVELENGTH_NM
+    ]
+    used_filename_wavelengths: set[int] = set()
+    used_fallback_genes = 0
+    messages: list[str] = []
+    channels: list[ChannelInfo] = []
+    for index, wavelength in enumerate(metadata_wavelengths):
+        gene = filename_labels.get(wavelength)
+        if gene is not None:
+            used_filename_wavelengths.add(wavelength)
+        elif wavelength == DAPI_WAVELENGTH_NM:
+            gene = DAPI_GENE
+        elif used_fallback_genes < len(filename_genes_by_order):
+            gene = filename_genes_by_order[used_fallback_genes]
+            used_fallback_genes += 1
+        else:
+            gene = f"channel_{index + 1}"
+            messages.append(
+                f"Channel {index + 1} was inferred as {wavelength} nm, "
+                "but no filename gene token matched it."
+            )
+
+        channels.append(
+            ChannelInfo(
+                index=index,
+                gene=gene,
+                wavelength_nm=wavelength,
+            )
+        )
+
+    filename_wavelengths = {
+        wavelength
+        for wavelength in filename_labels
+        if wavelength != DAPI_WAVELENGTH_NM
+    }
+    metadata_gene_wavelengths = {
+        channel.wavelength_nm
+        for channel in channels
+        if channel.gene != DAPI_GENE
+    }
+    unmatched_filename_wavelengths = sorted(
+        filename_wavelengths - used_filename_wavelengths
+    )
+    for wavelength in unmatched_filename_wavelengths:
+        gene = filename_labels[wavelength]
+        messages.append(
+            f"Filename label {gene}_{wavelength}nm did not match any "
+            "metadata-inferred channel wavelength."
+        )
+    for wavelength in sorted(metadata_gene_wavelengths - filename_wavelengths):
+        messages.append(
+            f"Metadata inferred a {wavelength} nm gene channel that was not "
+            "present in the filename."
+        )
+
+    requires_confirmation = bool(messages) or len(channels) != channel_count
+    try:
+        channels = validate_channel_mapping(channels, channel_count)
+    except StackFormatError as exc:
+        fallback = build_channel_mapping_suggestions(path, channel_count)
+        return ChannelMappingInference(
+            channels=fallback,
+            requires_confirmation=True,
+            messages=(*messages, str(exc)),
+        )
+    return ChannelMappingInference(
+        channels=channels,
+        requires_confirmation=requires_confirmation,
+        messages=tuple(messages),
+    )
 
 
 def build_channel_mapping_suggestions(
@@ -211,12 +306,22 @@ def read_lsm_metadata(
                 f"{source.name}"
             )
         channel_count = int(series.shape[1])
-        channel_mapping = (
-            validate_channel_mapping(channels, channel_count)
-            if channels is not None
-            else build_channel_mapping(source, channel_count)
-        )
         lsm_metadata = tiff.lsm_metadata or {}
+        if channels is not None:
+            channel_mapping = validate_channel_mapping(channels, channel_count)
+            requires_confirmation = False
+            messages: tuple[str, ...] = ()
+        else:
+            inference = infer_channel_mapping(source, channel_count, lsm_metadata)
+            if inference.requires_confirmation:
+                detail = " ".join(inference.messages)
+                raise StackFormatError(
+                    f"Confirm channel mapping for {source.name}."
+                    + (f" {detail}" if detail else "")
+                )
+            channel_mapping = inference.channels
+            requires_confirmation = inference.requires_confirmation
+            messages = inference.messages
         return StackMetadata(
             path=str(source.expanduser().resolve()),
             axes=series.axes,
@@ -226,6 +331,8 @@ def read_lsm_metadata(
             voxel_size_x_m=_optional_float(lsm_metadata.get("VoxelSizeX")),
             voxel_size_y_m=_optional_float(lsm_metadata.get("VoxelSizeY")),
             voxel_size_z_m=_optional_float(lsm_metadata.get("VoxelSizeZ")),
+            channel_mapping_requires_confirmation=requires_confirmation,
+            channel_mapping_messages=messages,
         )
 
 
@@ -328,15 +435,18 @@ def read_unlabeled_lsm_metadata(path: str | Path) -> StackMetadata:
             )
         channel_count = int(series.shape[1])
         lsm_metadata = tiff.lsm_metadata or {}
+        inference = infer_channel_mapping(source, channel_count, lsm_metadata)
         return StackMetadata(
             path=str(source.expanduser().resolve()),
             axes=series.axes,
             shape=tuple(int(dim) for dim in series.shape),
             dtype=str(series.dtype),
-            channels=build_channel_mapping_suggestions(source, channel_count),
+            channels=inference.channels,
             voxel_size_x_m=_optional_float(lsm_metadata.get("VoxelSizeX")),
             voxel_size_y_m=_optional_float(lsm_metadata.get("VoxelSizeY")),
             voxel_size_z_m=_optional_float(lsm_metadata.get("VoxelSizeZ")),
+            channel_mapping_requires_confirmation=inference.requires_confirmation,
+            channel_mapping_messages=inference.messages,
         )
 
 
@@ -603,6 +713,145 @@ def _optional_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_filename_channel_labels(path: str | Path) -> dict[int, str]:
+    stem = Path(path).stem
+    tokens = stem.split("_")
+    labels: dict[int, str] = {}
+    for _, wavelength, gene in _filename_channel_label_segments(tokens):
+        if wavelength not in INFERRED_WAVELENGTHS_NM:
+            continue
+        if gene:
+            labels[wavelength] = gene
+    return labels
+
+
+def _filename_channel_label_segments(
+    tokens: list[str],
+) -> list[tuple[int, int, str]]:
+    segments: list[tuple[int, int, str]] = []
+    segment_start = 0
+    for index, token in enumerate(tokens):
+        match = re.fullmatch(r"(\d+)(?:nm)?", token, flags=re.IGNORECASE)
+        if match is None:
+            continue
+        wavelength = int(match.group(1))
+        if wavelength not in INFERRED_WAVELENGTHS_NM:
+            continue
+        gene_tokens = tokens[segment_start:index]
+        while len(gene_tokens) > 1 and _is_filename_prefix_token(gene_tokens[0]):
+            gene_tokens = gene_tokens[1:]
+        gene = "_".join(token.strip() for token in gene_tokens if token.strip())
+        segments.append((index, wavelength, gene))
+        segment_start = index + 1
+    return segments
+
+
+def _is_filename_prefix_token(token: str) -> bool:
+    cleaned = token.strip()
+    return bool(
+        re.fullmatch(r"\d{6,8}", cleaned)
+        or re.fullmatch(r"[fF]\d+", cleaned)
+        or re.fullmatch(r"[lL]\d+", cleaned)
+        or cleaned.lower() == "sample"
+    )
+
+
+def _infer_metadata_channel_wavelengths(
+    channel_count: int,
+    lsm_metadata: dict[str, Any],
+) -> list[int] | None:
+    hints: list[dict[str, Any]] = [dict() for _ in range(channel_count)]
+    channel_wavelength = lsm_metadata.get("ChannelWavelength")
+    if channel_wavelength is not None:
+        for index, row in enumerate(channel_wavelength):
+            if index >= channel_count:
+                break
+            try:
+                start = float(row[0]) * 1_000_000_000
+                stop = float(row[1]) * 1_000_000_000
+            except (TypeError, ValueError, IndexError):
+                continue
+            hints[index]["emission_start_nm"] = start
+            hints[index]["emission_stop_nm"] = stop
+
+    scan_information = lsm_metadata.get("ScanInformation") or {}
+    for track in scan_information.get("Tracks", []):
+        data_channels = track.get("DataChannels", [])
+        detection_channels = track.get("DetectionChannels", [])
+        illumination_channels = track.get("IlluminationChannels", [])
+        illumination_nm = [
+            _optional_float(channel.get("Wavelength"))
+            for channel in illumination_channels
+        ]
+        illumination_nm = [
+            value for value in illumination_nm if value is not None
+        ]
+        for data_index, data_channel in enumerate(data_channels):
+            channel_index = data_channel.get("Acquire")
+            if not isinstance(channel_index, int):
+                continue
+            if channel_index < 0 or channel_index >= channel_count:
+                continue
+            detection = (
+                detection_channels[data_index]
+                if data_index < len(detection_channels)
+                else {}
+            )
+            hints[channel_index]["dye_name"] = detection.get("DyeName")
+            hints[channel_index]["illumination_nm"] = illumination_nm
+            start = _optional_float(detection.get("SpiWavelengthStart"))
+            stop = _optional_float(detection.get("SpiWavelengthStop"))
+            if start is not None:
+                hints[channel_index]["emission_start_nm"] = start
+            if stop is not None:
+                hints[channel_index]["emission_stop_nm"] = stop
+
+    wavelengths: list[int] = []
+    for hint in hints:
+        wavelength = _infer_channel_wavelength_from_hint(hint)
+        if wavelength is None:
+            return None
+        wavelengths.append(wavelength)
+    if len(set(wavelengths)) != len(wavelengths):
+        return None
+    return wavelengths
+
+
+def _infer_channel_wavelength_from_hint(hint: dict[str, Any]) -> int | None:
+    dye_name = str(hint.get("dye_name") or "").lower()
+    if "dapi" in dye_name:
+        return DAPI_WAVELENGTH_NM
+    if "egfp" in dye_name or "gfp" in dye_name or "488" in dye_name:
+        return 488
+    if "546" in dye_name:
+        return 546
+    if "647" in dye_name:
+        return 647
+
+    illumination_nm = [
+        int(round(value))
+        for value in hint.get("illumination_nm") or []
+    ]
+    if DAPI_WAVELENGTH_NM in illumination_nm:
+        return DAPI_WAVELENGTH_NM
+    if len(illumination_nm) == 1:
+        wavelength = illumination_nm[0]
+        if wavelength == 633:
+            return 647
+        if wavelength in {488, 546, 647}:
+            return wavelength
+
+    start = _optional_float(hint.get("emission_start_nm"))
+    stop = _optional_float(hint.get("emission_stop_nm"))
+    if start is None or stop is None:
+        return None
+    if 646 <= start <= 650:
+        return 647
+    if 492 <= start <= 500 and 540 <= stop <= 580:
+        return 488
+    return None
 
 
 def _dapi_channel(channels: list[ChannelInfo]) -> ChannelInfo:

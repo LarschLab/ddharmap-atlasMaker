@@ -13,6 +13,7 @@ from brain_atlas_preprocess.io import (
     build_channel_mapping_suggestions,
     crop_square_zyx,
     export_preprocessed_channels,
+    infer_channel_mapping,
     load_channel_mip,
     load_channel_mips,
     load_dapi_mip,
@@ -99,6 +100,119 @@ def test_validate_channel_mapping_rejects_duplicate_output_labels():
             ],
             channel_count=2,
         )
+
+
+def test_infer_channel_mapping_uses_lsm_metadata_order_and_filename_genes():
+    inference = infer_channel_mapping(
+        "L758_f02_H2B-GC6s_488_sst1_1_546_pth2_647.lsm",
+        3,
+        _lsm_metadata_488_546_647(),
+    )
+
+    assert not inference.requires_confirmation
+    assert inference.messages == ()
+    assert [(c.index, c.gene, c.wavelength_nm) for c in inference.channels] == [
+        (0, "H2B-GC6s", 488),
+        (1, "sst1_1", 546),
+        (2, "pth2", 647),
+    ]
+
+
+def test_infer_channel_mapping_uses_lsm_metadata_for_dapi_stack_order():
+    inference = infer_channel_mapping(
+        "trha_488_kiss2_647_DAPI_740nm_f03_Stitch.lsm",
+        3,
+        _lsm_metadata_488_647_dapi(),
+    )
+
+    assert not inference.requires_confirmation
+    assert [(c.index, c.gene, c.wavelength_nm) for c in inference.channels] == [
+        (0, "trha", 488),
+        (1, "kiss2", 647),
+        (2, "DAPI", 740),
+    ]
+
+
+def test_infer_channel_mapping_requires_confirmation_for_filename_metadata_conflict():
+    inference = infer_channel_mapping(
+        "trha_546_kiss2_647_DAPI_740nm_f03_Stitch.lsm",
+        3,
+        _lsm_metadata_488_647_dapi(),
+    )
+
+    assert inference.requires_confirmation
+    assert [(c.index, c.gene, c.wavelength_nm) for c in inference.channels] == [
+        (0, "trha", 488),
+        (1, "kiss2", 647),
+        (2, "DAPI", 740),
+    ]
+    assert "trha_546nm" in " ".join(inference.messages)
+    assert "488 nm" in " ".join(inference.messages)
+
+
+def test_infer_channel_mapping_falls_back_to_filename_suggestions_without_metadata():
+    inference = infer_channel_mapping(
+        "sample_gene_a_488.lsm",
+        3,
+        {},
+    )
+
+    assert inference.requires_confirmation
+    assert [(c.index, c.gene, c.wavelength_nm) for c in inference.channels] == [
+        (0, "gene_a", 488),
+        (1, "channel_2", 2),
+        (2, "DAPI", 740),
+    ]
+
+
+def test_read_lsm_metadata_autodiscovers_conflict_free_channels(monkeypatch):
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.tifffile.TiffFile",
+        lambda path: _FakeMetadataTiff(_lsm_metadata_488_546_647()),
+    )
+
+    metadata = read_lsm_metadata(
+        "L758_f02_H2B-GC6s_488_sst1_1_546_pth2_647.lsm"
+    )
+
+    assert not metadata.channel_mapping_requires_confirmation
+    assert [(c.index, c.gene, c.wavelength_nm) for c in metadata.channels] == [
+        (0, "H2B-GC6s", 488),
+        (1, "sst1_1", 546),
+        (2, "pth2", 647),
+    ]
+
+
+def test_read_lsm_metadata_rejects_autodiscovered_conflict(monkeypatch):
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.tifffile.TiffFile",
+        lambda path: _FakeMetadataTiff(_lsm_metadata_488_647_dapi()),
+    )
+
+    with pytest.raises(StackFormatError, match="Confirm channel mapping"):
+        read_lsm_metadata(
+            "trha_546_kiss2_647_DAPI_740nm_f03_Stitch.lsm"
+        )
+
+
+def test_read_lsm_metadata_manual_channels_bypass_autodiscovery(monkeypatch):
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.tifffile.TiffFile",
+        lambda path: _FakeMetadataTiff(_lsm_metadata_488_647_dapi()),
+    )
+    channels = [
+        ChannelInfo(index=0, gene="trha", wavelength_nm=546),
+        ChannelInfo(index=1, gene="kiss2", wavelength_nm=647),
+        ChannelInfo(index=2, gene="DAPI", wavelength_nm=740),
+    ]
+
+    metadata = read_lsm_metadata(
+        "trha_546_kiss2_647_DAPI_740nm_f03_Stitch.lsm",
+        channels=channels,
+    )
+
+    assert metadata.channels == channels
+    assert not metadata.channel_mapping_requires_confirmation
 
 
 def test_rotate_stack_zero_degrees_preserves_data_and_dtype():
@@ -703,7 +817,125 @@ def test_optional_20260525_mismatched_stack_directory_smoke():
         assert mip.shape == file_state.shape[-2:]
 
     assert auto_count > 0
-    assert manual_count > 0
+    assert auto_count + manual_count == len(paths)
+
+
+class _FakeMetadataSeries:
+    axes = "ZCYX"
+    shape = (2, 3, 4, 5)
+    dtype = np.dtype("uint8")
+
+
+class _FakeMetadataTiff:
+    is_lsm = True
+
+    def __init__(self, lsm_metadata):
+        self.series = [_FakeMetadataSeries()]
+        self.lsm_metadata = lsm_metadata
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        return False
+
+
+def _lsm_metadata_488_546_647():
+    return {
+        "ChannelWavelength": np.array(
+            [
+                [4.9245e-7, 5.4207e-7],
+                [5.6901e-7, 7.3500e-7],
+                [5.6620e-7, 7.3507e-7],
+            ]
+        ),
+        "ScanInformation": {
+            "Tracks": [
+                {
+                    "DataChannels": [
+                        {"Acquire": 0, "Name": "Ch1"},
+                        {"Acquire": 1, "Name": "Ch2"},
+                    ],
+                    "DetectionChannels": [
+                        {
+                            "DyeName": "EGFP",
+                            "SpiWavelengthStart": 492.45,
+                            "SpiWavelengthStop": 542.07,
+                        },
+                        {
+                            "DyeName": "Alexa Fluor 546",
+                            "SpiWavelengthStart": 569.01,
+                            "SpiWavelengthStop": 735.0,
+                        },
+                    ],
+                    "IlluminationChannels": [
+                        {"Wavelength": 561.0},
+                        {"Wavelength": 488.0},
+                    ],
+                },
+                {
+                    "DataChannels": [{"Acquire": 2, "Name": "Ch1"}],
+                    "DetectionChannels": [
+                        {
+                            "DyeName": "Alexa Fluor 647",
+                            "SpiWavelengthStart": 566.2,
+                            "SpiWavelengthStop": 735.07,
+                        },
+                    ],
+                    "IlluminationChannels": [{"Wavelength": 633.0}],
+                },
+            ],
+        },
+    }
+
+
+def _lsm_metadata_488_647_dapi():
+    return {
+        "ChannelWavelength": np.array(
+            [
+                [4.9595e-7, 5.7782e-7],
+                [6.4651e-7, 7.3173e-7],
+                [4.1170e-7, 5.5207e-7],
+            ]
+        ),
+        "ScanInformation": {
+            "Tracks": [
+                {
+                    "DataChannels": [
+                        {"Acquire": 0, "Name": "Ch1"},
+                        {"Acquire": 1, "Name": "Ch2"},
+                    ],
+                    "DetectionChannels": [
+                        {
+                            "DyeName": "Alexa Fluor 488",
+                            "SpiWavelengthStart": 495.95,
+                            "SpiWavelengthStop": 577.82,
+                        },
+                        {
+                            "DyeName": "Alexa Fluor 647",
+                            "SpiWavelengthStart": 646.51,
+                            "SpiWavelengthStop": 731.73,
+                        },
+                    ],
+                    "IlluminationChannels": [
+                        {"Wavelength": 633.0},
+                        {"Wavelength": 488.0},
+                    ],
+                },
+                {
+                    "DataChannels": [{"Acquire": 2, "Name": "Ch1"}],
+                    "DetectionChannels": [
+                        {
+                            "DyeName": "DAPI",
+                            "SpiWavelengthStart": 411.7,
+                            "SpiWavelengthStop": 552.07,
+                        },
+                    ],
+                    "IlluminationChannels": [{"Wavelength": 740.0}],
+                },
+            ],
+        },
+    }
 
 
 def _read_grayscale_png(path: Path) -> np.ndarray:

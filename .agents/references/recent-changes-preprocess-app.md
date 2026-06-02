@@ -143,3 +143,11 @@ Passes completed: Changed channel transforms to use four CPU worker threads by d
 What changed: `export_preprocessed_channels` now defaults to four channel transform workers. Added a regression comparing one-worker and four-worker exports byte-for-byte after NRRD readback.
 Rerun implications: New preprocessing exports should be faster and remain bit-identical to the prior single-worker SciPy transform path.
 Validation performed: `pytest tests/test_io.py -q`; `pytest -q`.
+
+## 2026-06-02 - LSM metadata channel autodiscovery
+
+Slice goal: Use Zeiss LSM metadata to infer channel order and reduce manual channel mapping in the preprocess app.
+Passes completed: Inspected real LSM metadata for 488/546/647 and 488/647/DAPI stacks, then added reusable metadata channel inference with filename gene-label merging.
+What changed: `read_lsm_metadata` now auto-accepts complete, conflict-free metadata channel mappings. `read_unlabeled_lsm_metadata` and the channel dialog use metadata-derived suggestions and show confirmation messages when filename and metadata disagree.
+Rerun implications: Existing project JSON and exported outputs remain compatible. Newly added files with clear metadata may skip the manual mapping dialog; conflicting files still require user confirmation.
+Validation performed: `pytest tests/test_io.py`; real-stack inference check for `L758_f02_H2B-GC6s_488_sst1_1_546_pth2_647.lsm` and `trha_546_kiss2_647_DAPI_740nm_f03_Stitch.lsm`.

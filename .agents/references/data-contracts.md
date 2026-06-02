@@ -10,9 +10,10 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - `read_lsm_metadata` requires the primary series axes to be `ZCYX`.
 - Source shape is interpreted as `(Z, C, Y, X)`.
 - Filename gene/wavelength pairs use tokens like `<gene>_<wavelength>`.
-- Supported gene wavelengths are `546`, `488`, and `647`.
-- Automatic channel parsing uses expected order `546`, `488`, `647`, followed by DAPI `740`, with missing gene wavelengths filtered out.
-- Parsed channel count must match the LSM channel count for automatic acceptance.
+- Supported gene wavelengths are `546`, `488`, and `647`; DAPI may appear as `740`/`740nm`.
+- Automatic channel mapping prefers LSM metadata channel order from `ScanInformation`, `ChannelWavelength`, and dye/illumination hints.
+- Filename tokens supply biological gene names after metadata establishes channel wavelength/order.
+- Conflict-free metadata mappings are accepted automatically; filename/metadata conflicts or incomplete metadata require user confirmation.
 - Ambiguous stacks may be accepted with a user-provided full channel mapping.
 
 ## Project state contract

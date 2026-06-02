@@ -33,7 +33,6 @@ from PySide6.QtWidgets import (
 
 from brain_atlas_preprocess.io import (
     StackFormatError,
-    build_channel_mapping_suggestions,
     export_preprocessed_channels,
     load_channel_mips,
     load_labeled_channel_mip,
@@ -122,6 +121,7 @@ class ChannelMappingDialog(QDialog):
         channels: list[ChannelInfo],
         bridge_channel_index: int | None,
         preview_images: dict[int, object] | None = None,
+        mapping_messages: tuple[str, ...] = (),
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
@@ -136,6 +136,12 @@ class ChannelMappingDialog(QDialog):
 
         layout = QVBoxLayout(self)
         layout.addWidget(QLabel("Set channel labels and choose the bridge channel."))
+        if mapping_messages:
+            warning = QLabel(
+                "Confirm inferred channel mapping: " + " ".join(mapping_messages)
+            )
+            warning.setWordWrap(True)
+            layout.addWidget(warning)
 
         selected_bridge = bridge_channel_index
         if selected_bridge is None:
@@ -365,7 +371,7 @@ class MainWindow(QMainWindow):
         metadata = read_unlabeled_lsm_metadata(path)
         channels = existing.channels if existing is not None else metadata.channels
         if len(channels) != int(metadata.shape[1]):
-            channels = build_channel_mapping_suggestions(path, int(metadata.shape[1]))
+            channels = metadata.channels
         try:
             preview_images = load_channel_mips(path)
         except Exception:
@@ -380,6 +386,11 @@ class MainWindow(QMainWindow):
             channels,
             bridge_index,
             preview_images=preview_images,
+            mapping_messages=(
+                ()
+                if existing is not None
+                else metadata.channel_mapping_messages
+            ),
             parent=self,
         )
         if dialog.exec() != QDialog.DialogCode.Accepted:
