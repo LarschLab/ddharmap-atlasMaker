@@ -159,3 +159,11 @@ Passes completed: Added extended multi-selection, local `.lsm` file/folder drop 
 What changed: `StackFileList` now emits dropped local paths and delete-key requests. `MainWindow` reuses the existing add-stack flow for dropped `.lsm` files and immediate child `.lsm` files from dropped folders. `ProjectState.remove_files` owns path-based project removal.
 Rerun implications: Project JSON schema is unchanged. Delete/Backspace removes stacks from the project only; source files and output folders are untouched.
 Validation performed: `pytest tests/test_model.py tests/test_widgets.py`; `pytest`.
+
+## 2026-06-02 - preprocess app usability session wrap-up
+
+Slice goal: Record the completed usability improvements from the session after user validation.
+Passes completed: Implemented, tested, committed, and merged two feature branches into `codex/atlas`: `codex/lsm-channel-autodiscovery` and `codex/preprocess-drag-drop-delete`.
+What changed: The preprocess app now auto-discovers LSM channel order from Zeiss metadata while using filename tokens for gene names, flags metadata/filename conflicts for confirmation, accepts dropped `.lsm` files and one-level folders, supports extended multi-selection, and removes selected stacks with Delete/Backspace.
+Rerun implications: Existing project JSON and exported outputs remain compatible. The merged feature branches were deleted after merge cleanup.
+Validation performed: User tested both workflows successfully; implementation validation included `pytest tests/test_io.py`, `pytest tests/test_model.py tests/test_widgets.py`, full `pytest`, and real-stack channel inference checks.
