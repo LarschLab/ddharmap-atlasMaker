@@ -2,8 +2,10 @@ from pathlib import Path
 
 from brain_atlas_preprocess.model import (
     DEFAULT_CROP_SIZE_PX,
+    SAME_FISH_CONFOCAL_CROP_SIZE_PX,
     ChannelInfo,
     ProjectState,
+    SameFishConfocalProfile,
     StackFileState,
 )
 
@@ -52,6 +54,55 @@ def test_project_state_loads_legacy_crop_defaults():
 
     assert project.crop_size_px == DEFAULT_CROP_SIZE_PX
     assert project.files[0].crop_center_yx is None
+
+
+def test_project_state_round_trips_same_fish_confocal_profile(tmp_path):
+    project = ProjectState(
+        output_root=str(tmp_path),
+        crop_size_px=SAME_FISH_CONFOCAL_CROP_SIZE_PX,
+        same_fish_confocal=SameFishConfocalProfile(
+            fish_id="L758_f02",
+            round_role="rn",
+            round_number=2,
+        ),
+    )
+
+    saved = project.save()
+    loaded = ProjectState.load(saved)
+
+    assert loaded.crop_size_px == 1500
+    assert loaded.same_fish_confocal is not None
+    assert loaded.same_fish_confocal.fish_id == "L758_f02"
+    assert loaded.same_fish_confocal.round_role == "rn"
+    assert loaded.same_fish_confocal.round_number == 2
+    assert loaded.same_fish_confocal.round_label == "r2"
+
+
+def test_project_state_round_trips_file_same_fish_confocal_profile(tmp_path):
+    project = ProjectState(
+        output_root=str(tmp_path / "batch"),
+        crop_size_px=SAME_FISH_CONFOCAL_CROP_SIZE_PX,
+        files=[
+            StackFileState(
+                path="/tmp/L765_f02.lsm",
+                output_root=str(tmp_path / "L765_f02" / "02_reg" / "00_preprocessing"),
+                same_fish_confocal=SameFishConfocalProfile(
+                    fish_id="L765_f02",
+                    round_role="rbest",
+                ),
+            )
+        ],
+    )
+
+    saved = project.save()
+    loaded = ProjectState.load(saved)
+
+    assert loaded.files[0].output_root == str(
+        tmp_path / "L765_f02" / "02_reg" / "00_preprocessing"
+    )
+    assert loaded.files[0].same_fish_confocal is not None
+    assert loaded.files[0].same_fish_confocal.fish_id == "L765_f02"
+    assert loaded.files[0].same_fish_confocal.round_role == "rbest"
 
 
 def test_project_state_loads_legacy_bridge_channel_from_dapi():

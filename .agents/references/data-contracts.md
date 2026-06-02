@@ -21,9 +21,12 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Project state is written as `brain_atlas_preprocess_project.json` in the selected output root.
 - `ProjectState` version is currently `1`.
 - Stable fields include `output_root`, `interpolation`, `canvas_mode`, `crop_size_px`, and `files`.
-- Per-file stable fields include `path`, `rotation_degrees`, `reviewed`, `crop_center_yx`, `channels`, `bridge_channel_index`, `axes`, and `shape`.
+- Optional `same_fish_confocal` project metadata activates the constrained same-fish confocal export profile only for explicit CLI/project use.
+- Per-file stable fields include `path`, `rotation_degrees`, `reviewed`, `crop_center_yx`, `channels`, `bridge_channel_index`, `axes`, `shape`, optional `output_root`, and optional `same_fish_confocal`.
+- Per-file `output_root` and `same_fish_confocal` override the project-level values during export; this supports one GUI project containing multiple same-fish confocal fish.
 - Crop coordinates are stored as `(y, x)` and serialized as `crop_center_yx`.
 - Default crop size is `750 px`.
+- Same-fish confocal profile launches default to `1500 px` crop size.
 
 ## Transform contract
 
@@ -44,6 +47,9 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Channel file name is `<source_stem>_<safe_gene>_<wavelength>nm_preprocessed.nrrd`.
 - Manifest file name is `preprocess_manifest.json`.
 - DAPI QC image file name is `preprocess_qc_dapi_mip.png`.
+- Same-fish confocal profile exports to `<output_root>/rbest/` or `<output_root>/rn/` and writes `<fish_id>_<rbest|rN>_channel<index>_<gene>.nrrd`; when a stack has a per-file output root, that root is used for that stack.
+- Same-fish confocal profile normalizes channel index `0` to `GCaMP`; default app exports keep inferred/manual channel names.
+- Same-fish confocal manifests and QC images are suffixed by round label, e.g. `preprocess_manifest_rbest.json` and `preprocess_qc_r2_mip.png`.
 - QC image generation uses the per-stack selected bridge channel.
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
 - NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.

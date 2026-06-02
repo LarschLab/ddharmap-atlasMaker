@@ -159,3 +159,19 @@ Passes completed: Added extended multi-selection, local `.lsm` file/folder drop 
 What changed: `StackFileList` now emits dropped local paths and delete-key requests. `MainWindow` reuses the existing add-stack flow for dropped `.lsm` files and immediate child `.lsm` files from dropped folders. `ProjectState.remove_files` owns path-based project removal.
 Rerun implications: Project JSON schema is unchanged. Delete/Backspace removes stacks from the project only; source files and output folders are untouched.
 Validation performed: `pytest tests/test_model.py tests/test_widgets.py`; `pytest`.
+
+## 2026-06-02 - same-fish confocal export profile
+
+Slice goal: Support a constrained workflow for preprocessing repeated confocal staining rounds from the same fish while preserving default app naming.
+Passes completed: Added project-state profile metadata, CLI preseed flags, profile-aware export directory and filename builders, and a personal Codex skill with a staging/launch helper script.
+What changed: `brain-atlas-preprocess --profile same_fish_confocal` writes to `rbest/` or `rn/` under the output root, uses `1500 px` crop by default when no crop is supplied, normalizes channel index `0` to `GCaMP`, and names outputs as `<fish_id>_<rbest|rN>_channel<index>_<gene>.nrrd`. Regular app use keeps the existing `<source_stem>_preprocessed/` naming.
+Rerun implications: Existing projects and default exports remain compatible. Same-fish confocal projects should be launched through the CLI/profile or the `same-fish-confocal-preprocess` skill helper.
+Validation performed: `pytest tests/test_model.py tests/test_io.py`; `python -m brain_atlas_preprocess.app --help`; helper script no-launch and verify-only smoke checks with a temporary fish folder.
+
+## 2026-06-02 - same-fish confocal batch launch
+
+Slice goal: Avoid opening one preprocessing app instance per fish when staging multiple same-fish confocal cases.
+Passes completed: Added per-file same-fish confocal profile and output-root overrides, plus CLI startup from an existing project JSON. Updated the personal staging helper to accept repeated `--batch-case FISH_ID=SOURCE_STACK` arguments, create one batch project, and launch one app instance.
+What changed: `PreprocessWorker` resolves `file_state.output_root` and `file_state.same_fish_confocal` before falling back to project-level values. Batch helper projects can contain multiple fish that export to their own `02_reg/00_preprocessing/<rbest|rn>/` folders from a single GUI window.
+Rerun implications: Existing project-level same-fish launches remain compatible. For multiple fish, prefer the helper batch form instead of invoking the helper once per source stack.
+Validation performed: `pytest tests/test_model.py tests/test_app.py tests/test_io.py -k 'same_fish_confocal or file_specific_output_roots or parse_args_rejects or round_trip'`; `python3 -m py_compile brain_atlas_preprocess/model.py brain_atlas_preprocess/app.py /Users/ddharmap/.codex/skills/same-fish-confocal-preprocess/scripts/stage_and_launch.py`; batch helper `--verify-only` on L765_f02/L765_f03.

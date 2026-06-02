@@ -9,6 +9,8 @@ import json
 PROJECT_FILENAME = "brain_atlas_preprocess_project.json"
 ANGLE_EPSILON = 1e-3
 DEFAULT_CROP_SIZE_PX = 750
+SAME_FISH_CONFOCAL_PROFILE = "same_fish_confocal"
+SAME_FISH_CONFOCAL_CROP_SIZE_PX = 1500
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,55 @@ class ChannelInfo:
         )
 
 
+@dataclass(frozen=True)
+class SameFishConfocalProfile:
+    fish_id: str
+    round_role: str
+    round_number: int | None = None
+
+    def __post_init__(self) -> None:
+        fish_id = self.fish_id.strip()
+        round_role = self.round_role.strip().lower()
+        if not fish_id:
+            raise ValueError("Same-fish confocal profile requires a fish ID.")
+        if round_role not in {"rbest", "rn"}:
+            raise ValueError("Same-fish confocal round role must be rbest or rn.")
+        if round_role == "rn" and self.round_number is None:
+            raise ValueError("Same-fish confocal rn exports require a round number.")
+        if self.round_number is not None and self.round_number < 1:
+            raise ValueError("Same-fish confocal round number must be positive.")
+        object.__setattr__(self, "fish_id", fish_id)
+        object.__setattr__(self, "round_role", round_role)
+
+    @property
+    def round_label(self) -> str:
+        if self.round_role == "rbest":
+            return "rbest"
+        if self.round_number is None:
+            raise ValueError("Same-fish confocal rn exports require a round number.")
+        return f"r{self.round_number}"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "profile": SAME_FISH_CONFOCAL_PROFILE,
+            "fish_id": self.fish_id,
+            "round_role": self.round_role,
+            "round_number": self.round_number,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "SameFishConfocalProfile":
+        profile = data.get("profile", SAME_FISH_CONFOCAL_PROFILE)
+        if profile != SAME_FISH_CONFOCAL_PROFILE:
+            raise ValueError(f"Unsupported export profile: {profile}")
+        round_number = data.get("round_number")
+        return cls(
+            fish_id=str(data["fish_id"]),
+            round_role=str(data["round_role"]),
+            round_number=int(round_number) if round_number is not None else None,
+        )
+
+
 @dataclass
 class StackFileState:
     path: str
@@ -47,6 +98,8 @@ class StackFileState:
     bridge_channel_index: int | None = None
     axes: str | None = None
     shape: tuple[int, ...] | None = None
+    output_root: str | None = None
+    same_fish_confocal: SameFishConfocalProfile | None = None
 
     @property
     def name(self) -> str:
@@ -83,12 +136,19 @@ class StackFileState:
             "bridge_channel_index": self.resolved_bridge_channel_index(),
             "axes": self.axes,
             "shape": list(self.shape) if self.shape is not None else None,
+            "output_root": self.output_root,
+            "same_fish_confocal": (
+                self.same_fish_confocal.to_dict()
+                if self.same_fish_confocal is not None
+                else None
+            ),
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "StackFileState":
         shape = data.get("shape")
         crop_center = data.get("crop_center_yx")
+        same_fish_confocal = data.get("same_fish_confocal")
         file_state = cls(
             path=str(data["path"]),
             rotation_degrees=float(data.get("rotation_degrees", 0.0)),
@@ -108,6 +168,12 @@ class StackFileState:
             ),
             axes=data.get("axes"),
             shape=tuple(shape) if shape is not None else None,
+            output_root=data.get("output_root"),
+            same_fish_confocal=(
+                SameFishConfocalProfile.from_dict(same_fish_confocal)
+                if same_fish_confocal is not None
+                else None
+            ),
         )
         file_state.bridge_channel_index = file_state.resolved_bridge_channel_index()
         return file_state
@@ -120,6 +186,7 @@ class ProjectState:
     interpolation: str = "linear"
     canvas_mode: str = "expand"
     crop_size_px: int = DEFAULT_CROP_SIZE_PX
+    same_fish_confocal: SameFishConfocalProfile | None = None
 
     def project_path(self) -> Path | None:
         if not self.output_root:
@@ -164,16 +231,27 @@ class ProjectState:
             "interpolation": self.interpolation,
             "canvas_mode": self.canvas_mode,
             "crop_size_px": self.crop_size_px,
+            "same_fish_confocal": (
+                self.same_fish_confocal.to_dict()
+                if self.same_fish_confocal is not None
+                else None
+            ),
             "files": [file_state.to_dict() for file_state in self.files],
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "ProjectState":
+        same_fish_confocal = data.get("same_fish_confocal")
         return cls(
             output_root=data.get("output_root"),
             interpolation=str(data.get("interpolation", "linear")),
             canvas_mode=str(data.get("canvas_mode", "expand")),
             crop_size_px=int(data.get("crop_size_px", DEFAULT_CROP_SIZE_PX)),
+            same_fish_confocal=(
+                SameFishConfocalProfile.from_dict(same_fish_confocal)
+                if same_fish_confocal is not None
+                else None
+            ),
             files=[
                 StackFileState.from_dict(file_state)
                 for file_state in data.get("files", [])

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 import json
@@ -14,7 +14,7 @@ import numpy as np
 from scipy import ndimage
 import tifffile
 
-from .model import ChannelInfo, StackFileState
+from .model import ChannelInfo, SameFishConfocalProfile, StackFileState
 
 
 EXPECTED_GENE_WAVELENGTH_ORDER = [546, 488, 647]
@@ -529,6 +529,7 @@ def export_preprocessed_channels(
     nrrd_encoding: str = "raw",
     nrrd_compression_level: int = 9,
     transform_workers: int = DEFAULT_TRANSFORM_WORKERS,
+    same_fish_confocal: SameFishConfocalProfile | None = None,
 ) -> Path:
     if interpolation not in SUPPORTED_INTERPOLATION:
         raise ValueError(f"Unsupported interpolation: {interpolation}")
@@ -545,8 +546,9 @@ def export_preprocessed_channels(
     bridge_index = file_state.resolved_bridge_channel_index()
     if bridge_index is None:
         bridge_index = _dapi_channel(metadata.channels).index
-    bridge_channel = _channel_by_index(metadata.channels, bridge_index)
-    output_dir = Path(output_root) / f"{source.stem}_preprocessed"
+    export_channels = _profile_channels(metadata.channels, same_fish_confocal)
+    bridge_channel = _channel_by_index(export_channels, bridge_index)
+    output_dir = _export_output_dir(source, output_root, same_fish_confocal)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     with tifffile.TiffFile(source) as tiff:
@@ -559,7 +561,7 @@ def export_preprocessed_channels(
     )
     transformed_channels = _transform_preprocessed_channels(
         data,
-        metadata.channels,
+        export_channels,
         applied_rotation_degrees,
         file_state.crop_center_yx,
         crop_size_px,
@@ -568,11 +570,11 @@ def export_preprocessed_channels(
         transform_workers=transform_workers,
     )
     for channel, cropped in transformed_channels:
-        out_name = (
-            f"{source.stem}_{_safe_filename_part(channel.gene)}_"
-            f"{channel.wavelength_nm}nm_preprocessed.nrrd"
+        out_path = output_dir / _export_channel_filename(
+            source,
+            channel,
+            same_fish_confocal,
         )
-        out_path = output_dir / out_name
         _write_stack_nrrd(
             out_path,
             cropped,
@@ -593,7 +595,7 @@ def export_preprocessed_channels(
             }
         )
         if channel.index == bridge_channel.index:
-            qc_path = output_dir / "preprocess_qc_dapi_mip.png"
+            qc_path = output_dir / _export_qc_filename(same_fish_confocal)
             _write_stack_mip_png(qc_path, cropped)
             qc = {
                 "dapi_mip_path": str(qc_path),
@@ -618,9 +620,65 @@ def export_preprocessed_channels(
         "qc": qc,
         "output_files": output_files,
     }
-    manifest_path = output_dir / "preprocess_manifest.json"
+    manifest_path = output_dir / _export_manifest_filename(same_fish_confocal)
     manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     return output_dir
+
+
+def _profile_channels(
+    channels: list[ChannelInfo],
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> list[ChannelInfo]:
+    if same_fish_confocal is None:
+        return channels
+    return [
+        replace(channel, gene="GCaMP") if channel.index == 0 else channel
+        for channel in channels
+    ]
+
+
+def _export_output_dir(
+    source: Path,
+    output_root: str | Path,
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> Path:
+    if same_fish_confocal is None:
+        return Path(output_root) / f"{source.stem}_preprocessed"
+    return Path(output_root) / same_fish_confocal.round_role
+
+
+def _export_channel_filename(
+    source: Path,
+    channel: ChannelInfo,
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> str:
+    safe_gene = _safe_filename_part(channel.gene)
+    if same_fish_confocal is None:
+        return (
+            f"{source.stem}_{safe_gene}_"
+            f"{channel.wavelength_nm}nm_preprocessed.nrrd"
+        )
+    return (
+        f"{_safe_filename_part(same_fish_confocal.fish_id)}_"
+        f"{same_fish_confocal.round_label}_"
+        f"channel{channel.index + 1}_{safe_gene}.nrrd"
+    )
+
+
+def _export_manifest_filename(
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> str:
+    if same_fish_confocal is None:
+        return "preprocess_manifest.json"
+    return f"preprocess_manifest_{same_fish_confocal.round_label}.json"
+
+
+def _export_qc_filename(
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> str:
+    if same_fish_confocal is None:
+        return "preprocess_qc_dapi_mip.png"
+    return f"preprocess_qc_{same_fish_confocal.round_label}_mip.png"
 
 
 def _transform_preprocessed_channels(

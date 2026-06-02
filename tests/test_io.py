@@ -26,7 +26,11 @@ from brain_atlas_preprocess.io import (
     rotate_stack_zyx,
     validate_channel_mapping,
 )
-from brain_atlas_preprocess.model import ChannelInfo, StackFileState
+from brain_atlas_preprocess.model import (
+    ChannelInfo,
+    SameFishConfocalProfile,
+    StackFileState,
+)
 
 
 def test_parse_gene_wavelength_pairs_full_channel_name():
@@ -514,6 +518,140 @@ def test_export_preprocessed_channels_writes_raw_nrrd_by_default(tmp_path, monke
     assert header["encoding"] == "raw"
     assert exported.dtype == np.uint8
     np.testing.assert_array_equal(exported, data[:, 0, 0:2, 1:3])
+
+
+def test_export_preprocessed_channels_same_fish_confocal_profile(
+    tmp_path, monkeypatch
+):
+    nrrd = pytest.importorskip("nrrd")
+    channels = [
+        ChannelInfo(index=0, gene="H2B-GC6s", wavelength_nm=488),
+        ChannelInfo(index=1, gene="sst1_1", wavelength_nm=546),
+        ChannelInfo(index=2, gene="pth2", wavelength_nm=647),
+    ]
+    metadata = StackMetadata(
+        path=str(tmp_path / "L758_f02_H2B-GC6s_488_sst1_1_546_pth2_647.lsm"),
+        axes="ZCYX",
+        shape=(2, 3, 3, 4),
+        dtype="uint8",
+        channels=channels,
+    )
+    data = np.arange(np.prod(metadata.shape), dtype=np.uint8).reshape(metadata.shape)
+
+    class FakeSeries:
+        def asarray(self):
+            return data
+
+    class FakeTiffFile:
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.read_lsm_metadata",
+        lambda path, *, channels=None: metadata,
+    )
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    output_dir = export_preprocessed_channels(
+        StackFileState(
+            path=metadata.path,
+            rotation_degrees=0.0,
+            crop_center_yx=(1, 1),
+            channels=channels,
+            bridge_channel_index=0,
+        ),
+        tmp_path / "02_reg" / "00_preprocessing",
+        crop_size_px=2,
+        same_fish_confocal=SameFishConfocalProfile(
+            fish_id="L758_f02",
+            round_role="rbest",
+        ),
+    )
+
+    assert output_dir == tmp_path / "02_reg" / "00_preprocessing" / "rbest"
+    expected_names = {
+        "L758_f02_rbest_channel1_GCaMP.nrrd",
+        "L758_f02_rbest_channel2_sst1_1.nrrd",
+        "L758_f02_rbest_channel3_pth2.nrrd",
+    }
+    assert expected_names <= {path.name for path in output_dir.iterdir()}
+    assert (output_dir / "preprocess_manifest_rbest.json").exists()
+    assert (output_dir / "preprocess_qc_rbest_mip.png").exists()
+
+    exported, header = nrrd.read(
+        str(output_dir / "L758_f02_rbest_channel1_GCaMP.nrrd"),
+        index_order="C",
+    )
+    np.testing.assert_array_equal(exported, data[:, 0, 0:2, 0:2])
+    assert header["channel_gene"] == "GCaMP"
+    manifest = json.loads((output_dir / "preprocess_manifest_rbest.json").read_text())
+    assert manifest["output_files"][0]["channel"]["gene"] == "GCaMP"
+    assert Path(manifest["output_files"][0]["path"]).name.endswith("GCaMP.nrrd")
+
+
+def test_export_preprocessed_channels_same_fish_confocal_rn_names(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("nrrd")
+    channels = [
+        ChannelInfo(index=0, gene="H2B-GC6s", wavelength_nm=488),
+        ChannelInfo(index=1, gene="npy", wavelength_nm=546),
+    ]
+    metadata = StackMetadata(
+        path=str(tmp_path / "L758_f02_H2B-GC6s_488_npy_546.lsm"),
+        axes="ZCYX",
+        shape=(1, 2, 2, 2),
+        dtype="uint8",
+        channels=channels,
+    )
+    data = np.ones(metadata.shape, dtype=np.uint8)
+
+    class FakeSeries:
+        def asarray(self):
+            return data
+
+    class FakeTiffFile:
+        def __init__(self, path):
+            self.series = [FakeSeries()]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, traceback):
+            return False
+
+    monkeypatch.setattr(
+        "brain_atlas_preprocess.io.read_lsm_metadata",
+        lambda path, *, channels=None: metadata,
+    )
+    monkeypatch.setattr("brain_atlas_preprocess.io.tifffile.TiffFile", FakeTiffFile)
+
+    output_dir = export_preprocessed_channels(
+        StackFileState(
+            path=metadata.path,
+            crop_center_yx=(1, 1),
+            channels=channels,
+            bridge_channel_index=0,
+        ),
+        tmp_path,
+        crop_size_px=2,
+        same_fish_confocal=SameFishConfocalProfile(
+            fish_id="L758_f02",
+            round_role="rn",
+            round_number=4,
+        ),
+    )
+
+    assert output_dir == tmp_path / "rn"
+    assert (output_dir / "L758_f02_r4_channel1_GCaMP.nrrd").exists()
+    assert (output_dir / "L758_f02_r4_channel2_npy.nrrd").exists()
+    assert (output_dir / "preprocess_manifest_r4.json").exists()
 
 
 def test_export_preprocessed_channels_uses_selected_bridge_for_qc(

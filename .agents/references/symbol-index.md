@@ -8,10 +8,13 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 - `PROJECT_FILENAME`: canonical project JSON filename.
 - `DEFAULT_CROP_SIZE_PX`: default square crop size.
+- `SAME_FISH_CONFOCAL_PROFILE`: CLI/project identifier for constrained same-fish confocal exports.
+- `SAME_FISH_CONFOCAL_CROP_SIZE_PX`: enforced crop default for same-fish confocal launches.
 - `ChannelInfo`: channel index, gene, wavelength, label, and JSON serialization.
-- `StackFileState`: per-source review state, rotation, crop center, channel metadata, selected bridge channel, axes, and shape.
+- `SameFishConfocalProfile`: optional project export profile with fish ID, `rbest`/`rn` role, and explicit `rn` round number.
+- `StackFileState`: per-source review state, rotation, crop center, channel metadata, selected bridge channel, axes, shape, optional per-file output root, and optional per-file same-fish confocal profile.
 - `StackFileState.status`: file-list status authority.
-- `ProjectState`: output root, file list, interpolation/canvas/crop settings, JSON round trip.
+- `ProjectState`: output root, file list, interpolation/canvas/crop settings, optional project-level same-fish confocal profile, per-file override preservation, JSON round trip.
 - `ProjectState.add_or_update_file`: canonical path-based insert/update behavior.
 - `ProjectState.get_file`: canonical path-based lookup.
 - `ProjectState.remove_files`: canonical path-based removal behavior.
@@ -34,7 +37,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `load_dapi_mip`: compatibility wrapper for DAPI preview maximum-intensity projection.
 - `rotate_stack_zyx`: ZYX rotation and dtype preservation.
 - `crop_square_zyx`: square crop and zero-padding behavior.
-- `export_preprocessed_channels`: canonical export pipeline, output names, NRRD writes, and manifest.
+- `export_preprocessed_channels`: canonical export pipeline, optional same-fish confocal output names, NRRD writes, and manifest.
 - `export_rotated_channels`: legacy compatibility wrapper for `export_preprocessed_channels`.
 
 ## `brain_atlas_preprocess/widgets.py`

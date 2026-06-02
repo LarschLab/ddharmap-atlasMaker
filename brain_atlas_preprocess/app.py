@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 from pathlib import Path
 import sys
 import traceback
@@ -8,7 +9,7 @@ from typing import Any
 if __package__ in {None, ""}:
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import QObject, QThread, Signal, Slot, Qt
+from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot, Qt
 from PySide6.QtGui import QAction, QKeySequence
 from PySide6.QtWidgets import (
     QApplication,
@@ -42,8 +43,11 @@ from brain_atlas_preprocess.io import (
 )
 from brain_atlas_preprocess.model import (
     PROJECT_FILENAME,
+    SAME_FISH_CONFOCAL_CROP_SIZE_PX,
+    SAME_FISH_CONFOCAL_PROFILE,
     ChannelInfo,
     ProjectState,
+    SameFishConfocalProfile,
     StackFileState,
 )
 from brain_atlas_preprocess.widgets import (
@@ -92,11 +96,13 @@ class PreprocessWorker(QObject):
         files: list[StackFileState],
         output_root: str,
         crop_size_px: int,
+        same_fish_confocal: SameFishConfocalProfile | None = None,
     ) -> None:
         super().__init__()
         self.files = files
         self.output_root = output_root
         self.crop_size_px = crop_size_px
+        self.same_fish_confocal = same_fish_confocal
 
     @Slot()
     def run(self) -> None:
@@ -105,12 +111,17 @@ class PreprocessWorker(QObject):
             total = len(self.files)
             for index, file_state in enumerate(self.files, start=1):
                 self.progress.emit(index - 1, total, file_state.name)
+                output_root = file_state.output_root or self.output_root
+                same_fish_confocal = (
+                    file_state.same_fish_confocal or self.same_fish_confocal
+                )
                 output_dir = export_preprocessed_channels(
                     file_state,
-                    self.output_root,
+                    output_root,
                     interpolation="linear",
                     expand_canvas=True,
                     crop_size_px=self.crop_size_px,
+                    same_fish_confocal=same_fish_confocal,
                 )
                 outputs.append(str(output_dir))
                 self.progress.emit(index, total, file_state.name)
@@ -222,9 +233,22 @@ class ChannelMappingDialog(QDialog):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        output_root: str | None = None,
+        crop_size_px: int | None = None,
+        same_fish_confocal: SameFishConfocalProfile | None = None,
+        project: ProjectState | None = None,
+    ) -> None:
         super().__init__()
-        self.project = ProjectState()
+        self.project = project or ProjectState()
+        if output_root is not None:
+            self.project.output_root = output_root
+        if crop_size_px is not None:
+            self.project.crop_size_px = crop_size_px
+        if same_fish_confocal is not None:
+            self.project.same_fish_confocal = same_fish_confocal
         self.current_file: StackFileState | None = None
         self.preview_cache: dict[tuple[str, int], object] = {}
         self.pending_preview: tuple[str, int] | None = None
@@ -260,6 +284,8 @@ class MainWindow(QMainWindow):
 
         self._build_layout()
         self._install_shortcuts()
+        self.preview.set_crop_size(self.project.crop_size_px)
+        self._update_output_label()
 
     def _build_layout(self) -> None:
         add_files = QPushButton("Add Stacks")
@@ -751,6 +777,7 @@ class MainWindow(QMainWindow):
             list(self.project.files),
             self.project.output_root,
             self.project.crop_size_px,
+            self.project.same_fish_confocal,
         )
         self.preprocess_worker.moveToThread(self.preprocess_thread)
         self.preprocess_thread.started.connect(self.preprocess_worker.run)
@@ -813,7 +840,14 @@ class MainWindow(QMainWindow):
     def _update_output_label(self) -> None:
         if self.project.output_root:
             project_path = Path(self.project.output_root) / PROJECT_FILENAME
-            self.output_label.setText(f"Output: {self.project.output_root}\nProject: {project_path}")
+            label = f"Output: {self.project.output_root}\nProject: {project_path}"
+            if self.project.same_fish_confocal is not None:
+                profile = self.project.same_fish_confocal
+                label += (
+                    "\nProfile: same-fish confocal "
+                    f"{profile.fish_id} {profile.round_label}"
+                )
+            self.output_label.setText(label)
         else:
             self.output_label.setText("No output root selected")
 
@@ -822,10 +856,78 @@ def _format_error(exc: Exception) -> str:
     return "".join(traceback.format_exception_only(type(exc), exc)).strip()
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
-    window = MainWindow()
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("input_stacks", nargs="*", help="LSM stacks to preload.")
+    parser.add_argument("--project", help="Project JSON to open at startup.")
+    parser.add_argument("--output-root", help="Preprocessing output root.")
+    parser.add_argument("--crop-size-px", type=int, help="Square crop size in pixels.")
+    parser.add_argument(
+        "--profile",
+        choices=[SAME_FISH_CONFOCAL_PROFILE],
+        help="Constrained preprocessing/export profile.",
+    )
+    parser.add_argument("--fish-id", help="Fish ID for same-fish confocal exports.")
+    parser.add_argument(
+        "--round-role",
+        choices=["rbest", "rn"],
+        help="Round role for same-fish confocal exports.",
+    )
+    parser.add_argument(
+        "--round-number",
+        type=int,
+        help="Round number for same-fish confocal rn exports.",
+    )
+    args = parser.parse_args(argv)
+    if args.project and args.input_stacks:
+        parser.error("--project cannot be combined with input stacks")
+    if args.profile == SAME_FISH_CONFOCAL_PROFILE:
+        missing = [
+            name
+            for name in ["fish_id", "round_role", "output_root"]
+            if getattr(args, name) is None
+        ]
+        if missing:
+            parser.error(
+                "--profile same_fish_confocal requires "
+                + ", ".join(f"--{name.replace('_', '-')}" for name in missing)
+            )
+        if args.round_role == "rn" and args.round_number is None:
+            parser.error("--round-role rn requires --round-number")
+    return args
+
+
+def _same_fish_profile_from_args(
+    args: argparse.Namespace,
+) -> SameFishConfocalProfile | None:
+    if args.profile != SAME_FISH_CONFOCAL_PROFILE:
+        return None
+    return SameFishConfocalProfile(
+        fish_id=args.fish_id,
+        round_role=args.round_role,
+        round_number=args.round_number,
+    )
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = _parse_args(sys.argv[1:] if argv is None else argv)
+    same_fish_confocal = _same_fish_profile_from_args(args)
+    crop_size_px = args.crop_size_px
+    if same_fish_confocal is not None and crop_size_px is None:
+        crop_size_px = SAME_FISH_CONFOCAL_CROP_SIZE_PX
+    project = ProjectState.load(args.project) if args.project else None
+
+    qt_args = sys.argv[1:] if argv is None else argv
+    app = QApplication([sys.argv[0], *qt_args])
+    window = MainWindow(
+        output_root=args.output_root,
+        crop_size_px=crop_size_px,
+        same_fish_confocal=same_fish_confocal,
+        project=project,
+    )
     window.show()
+    if args.input_stacks:
+        QTimer.singleShot(0, lambda: window._add_stack_paths(args.input_stacks))
     return app.exec()
 
 
