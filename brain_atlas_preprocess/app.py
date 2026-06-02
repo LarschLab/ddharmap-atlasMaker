@@ -46,7 +46,12 @@ from brain_atlas_preprocess.model import (
     ProjectState,
     StackFileState,
 )
-from brain_atlas_preprocess.widgets import ChannelThumbnail, RotationPreview, StackFileList
+from brain_atlas_preprocess.widgets import (
+    ChannelThumbnail,
+    RotationPreview,
+    StackFileList,
+    dropped_stack_paths,
+)
 
 
 class PreviewWorker(QObject):
@@ -234,6 +239,8 @@ class MainWindow(QMainWindow):
 
         self.file_list = StackFileList()
         self.file_list.currentItemChanged.connect(self._selected_file_changed)
+        self.file_list.pathsDropped.connect(self._add_dropped_paths)
+        self.file_list.deletePressed.connect(self._remove_selected_files)
 
         self.preview = RotationPreview()
         self.preview.angleChanged.connect(self._angle_changed)
@@ -343,7 +350,26 @@ class MainWindow(QMainWindow):
         )
         if not paths:
             return
-        errors: list[str] = []
+        self._add_stack_paths(paths)
+
+    @Slot(list)
+    def _add_dropped_paths(self, paths: list[str]) -> None:
+        stack_paths, skipped = dropped_stack_paths(paths)
+        errors = [
+            f"Skipped unsupported drop item: {Path(path).name}"
+            for path in skipped
+        ]
+        self._add_stack_paths(stack_paths, errors=errors)
+
+    def _add_stack_paths(
+        self,
+        paths: list[str],
+        *,
+        errors: list[str] | None = None,
+    ) -> None:
+        if not paths and not errors:
+            return
+        errors = list(errors or [])
         for path in paths:
             try:
                 file_state = make_file_state(path)
@@ -665,6 +691,40 @@ class MainWindow(QMainWindow):
         else:
             row = max(0, min(self.file_list.count() - 1, row + delta))
         self.file_list.setCurrentRow(row)
+
+    @Slot()
+    def _remove_selected_files(self) -> None:
+        selected_items = self.file_list.selectedItems()
+        if not selected_items:
+            return
+        selected_rows = sorted(self.file_list.row(item) for item in selected_items)
+        selected_paths = self.file_list.selected_paths()
+        current_path = self.current_file.path if self.current_file else None
+        removed = self.project.remove_files(selected_paths)
+        if not removed:
+            return
+        removed_paths = {file_state.path for file_state in removed}
+        self.preview_cache = {
+            key: value
+            for key, value in self.preview_cache.items()
+            if key[0] not in removed_paths
+        }
+        if current_path in removed_paths:
+            self.current_file = None
+            target_row = selected_rows[0]
+            self.file_list.set_files(self.project.files)
+            if self.file_list.count():
+                self.file_list.setCurrentRow(
+                    min(target_row, self.file_list.count() - 1)
+                )
+            else:
+                self._selected_file_changed(None, None)
+        else:
+            self._refresh_file_list()
+        self._save_project_if_possible()
+        self.statusBar().showMessage(
+            f"Removed {len(removed)} stack(s) from project", 2500
+        )
 
     def _preprocess(self) -> None:
         if not self.project.output_root:

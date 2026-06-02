@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QWidget
 
 from .model import StackFileState
 
@@ -26,6 +27,14 @@ PREVIEW_LUTS = {
 
 
 class StackFileList(QListWidget):
+    pathsDropped = Signal(list)
+    deletePressed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
     def set_files(self, files: list[StackFileState]) -> None:
         self.clear()
         for file_state in files:
@@ -50,6 +59,75 @@ class StackFileList(QListWidget):
             "rotation_planned": f"{file_state.rotation_degrees:.2f} deg",
         }[file_state.status]
         item.setText(f"{file_state.name}  [{suffix}]")
+
+    def selected_paths(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.selectedItems()
+        ]
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if _dropped_local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if _dropped_local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: Any) -> None:
+        paths = _dropped_local_paths(event.mimeData())
+        if not paths:
+            super().dropEvent(event)
+            return
+        self.pathsDropped.emit(paths)
+        event.acceptProposedAction()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
+            self.deletePressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+def dropped_stack_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    stack_paths: list[str] = []
+    skipped: list[str] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_dir():
+            children = sorted(path.iterdir())
+            lsm_children = [
+                str(child)
+                for child in children
+                if child.is_file() and child.suffix.lower() == ".lsm"
+            ]
+            if lsm_children:
+                stack_paths.extend(lsm_children)
+            else:
+                skipped.append(str(path))
+        elif path.is_file() and path.suffix.lower() == ".lsm":
+            stack_paths.append(str(path))
+        else:
+            skipped.append(str(path))
+    return stack_paths, skipped
+
+
+def _dropped_local_paths(mime_data: Any) -> list[str]:
+    if mime_data is None or not mime_data.hasUrls():
+        return []
+    paths: list[str] = []
+    for url in mime_data.urls():
+        if not url.isLocalFile():
+            continue
+        local_path = url.toLocalFile()
+        if local_path:
+            paths.append(local_path)
+    return paths
 
 
 class ChannelThumbnail(QWidget):

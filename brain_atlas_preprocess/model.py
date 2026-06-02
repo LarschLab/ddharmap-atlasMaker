@@ -142,6 +142,21 @@ class ProjectState:
                 return file_state
         return None
 
+    def remove_files(self, paths: list[str]) -> list[StackFileState]:
+        resolved_paths = {
+            Path(path).expanduser().resolve()
+            for path in paths
+        }
+        removed: list[StackFileState] = []
+        remaining: list[StackFileState] = []
+        for file_state in self.files:
+            if Path(file_state.path).expanduser().resolve() in resolved_paths:
+                removed.append(file_state)
+            else:
+                remaining.append(file_state)
+        self.files = remaining
+        return removed
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "version": 1,
