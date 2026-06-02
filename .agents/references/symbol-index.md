@@ -20,9 +20,11 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 - `StackFormatError`: user-facing input contract failure.
 - `StackMetadata`: read-only source metadata and manifest serialization.
+- `ChannelMappingInference`: inferred channel labels plus confirmation messages.
 - `DEFAULT_TRANSFORM_WORKERS`: default CPU channel-transform worker count for exports.
 - `parse_gene_wavelength_pairs`: filename gene/wavelength parser.
-- `build_channel_mapping`: strict automatic channel order and DAPI append authority.
+- `infer_channel_mapping`: LSM metadata channel-order inference and filename gene-label merge.
+- `build_channel_mapping`: legacy strict filename channel order and DAPI append authority.
 - `build_channel_mapping_suggestions`: prefilled labels for ambiguous/manual channel mapping.
 - `validate_channel_mapping`: full channel mapping validation for manual labels.
 - `read_lsm_metadata`: LSM metadata contract and axes validation.
