@@ -151,3 +151,11 @@ Passes completed: Inspected real LSM metadata for 488/546/647 and 488/647/DAPI s
 What changed: `read_lsm_metadata` now auto-accepts complete, conflict-free metadata channel mappings. `read_unlabeled_lsm_metadata` and the channel dialog use metadata-derived suggestions and show confirmation messages when filename and metadata disagree.
 Rerun implications: Existing project JSON and exported outputs remain compatible. Newly added files with clear metadata may skip the manual mapping dialog; conflicting files still require user confirmation.
 Validation performed: `pytest tests/test_io.py`; real-stack inference check for `L758_f02_H2B-GC6s_488_sst1_1_546_pth2_647.lsm` and `trha_546_kiss2_647_DAPI_740nm_f03_Stitch.lsm`.
+
+## 2026-06-02 - stack list drag/drop and deletion
+
+Slice goal: Make stack list management faster in the preprocess app.
+Passes completed: Added extended multi-selection, local `.lsm` file/folder drop handling, and Delete/Backspace removal from the project list.
+What changed: `StackFileList` now emits dropped local paths and delete-key requests. `MainWindow` reuses the existing add-stack flow for dropped `.lsm` files and immediate child `.lsm` files from dropped folders. `ProjectState.remove_files` owns path-based project removal.
+Rerun implications: Project JSON schema is unchanged. Delete/Backspace removes stacks from the project only; source files and output folders are untouched.
+Validation performed: `pytest tests/test_model.py tests/test_widgets.py`; `pytest`.

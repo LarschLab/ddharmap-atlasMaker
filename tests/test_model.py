@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from brain_atlas_preprocess.model import (
     DEFAULT_CROP_SIZE_PX,
     ChannelInfo,
@@ -99,3 +101,32 @@ def test_file_statuses():
 
     file_state.rotation_degrees = -3.0
     assert file_state.status == "rotation_planned"
+
+
+def test_project_state_removes_files_by_resolved_path(tmp_path):
+    keep = tmp_path / "keep.lsm"
+    remove_a = tmp_path / "remove_a.lsm"
+    remove_b = tmp_path / "remove_b.lsm"
+    for path in [keep, remove_a, remove_b]:
+        path.write_text("", encoding="utf-8")
+    project = ProjectState(
+        files=[
+            StackFileState(path=str(remove_a)),
+            StackFileState(path=str(keep)),
+            StackFileState(path=str(remove_b)),
+        ],
+    )
+
+    removed = project.remove_files([
+        str(remove_a),
+        str(tmp_path / "." / "remove_b.lsm"),
+        str(tmp_path / "missing.lsm"),
+    ])
+
+    assert [Path(file_state.path).name for file_state in removed] == [
+        "remove_a.lsm",
+        "remove_b.lsm",
+    ]
+    assert [Path(file_state.path).name for file_state in project.files] == [
+        "keep.lsm",
+    ]

@@ -14,6 +14,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `ProjectState`: output root, file list, interpolation/canvas/crop settings, JSON round trip.
 - `ProjectState.add_or_update_file`: canonical path-based insert/update behavior.
 - `ProjectState.get_file`: canonical path-based lookup.
+- `ProjectState.remove_files`: canonical path-based removal behavior.
 - `ProjectState.save` / `ProjectState.load`: project persistence authority.
 
 ## `brain_atlas_preprocess/io.py`
@@ -38,7 +39,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 ## `brain_atlas_preprocess/widgets.py`
 
-- `StackFileList`: list rendering and status color/text application.
+- `StackFileList`: list rendering, status color/text application, multi-selection, and stack drop/delete signals.
 - `ChannelThumbnail`: compact non-interactive channel preview for mapping dialogs.
 - `RotationPreview`: preview rendering, angle updates, crop overlay, and mouse interactions.
 - `_rotated_shape_yx`: pure geometry helper used by crop overlay and coordinate mapping.
