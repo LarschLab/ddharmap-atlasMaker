@@ -175,3 +175,11 @@ Passes completed: Added per-file same-fish confocal profile and output-root over
 What changed: `PreprocessWorker` resolves `file_state.output_root` and `file_state.same_fish_confocal` before falling back to project-level values. Batch helper projects can contain multiple fish that export to their own `02_reg/00_preprocessing/<rbest|rn>/` folders from a single GUI window.
 Rerun implications: Existing project-level same-fish launches remain compatible. For multiple fish, prefer the helper batch form instead of invoking the helper once per source stack.
 Validation performed: `pytest tests/test_model.py tests/test_app.py tests/test_io.py -k 'same_fish_confocal or file_specific_output_roots or parse_args_rejects or round_trip'`; `python3 -m py_compile brain_atlas_preprocess/model.py brain_atlas_preprocess/app.py /Users/ddharmap/.codex/skills/same-fish-confocal-preprocess/scripts/stage_and_launch.py`; batch helper `--verify-only` on L765_f02/L765_f03.
+
+## 2026-06-04 - startup project file list population
+
+Slice goal: Fix `brain-atlas-preprocess --project <json>` launching with an empty visible stack list even though the project JSON contains files.
+Passes completed: Reproduced the empty-list path from a nine-fish same-fish confocal batch project and confirmed the project JSON itself contained all file entries.
+What changed: `MainWindow` now refreshes the stack list from a loaded `ProjectState` during construction and selects the first file when present, matching the existing Open Project button behavior.
+Rerun implications: Existing project JSON files remain compatible. Same-fish confocal batch projects launched with `--project` should now show preloaded stacks immediately.
+Validation performed: direct Qt offscreen smoke using `MainWindow(project=ProjectState(files=[...]))`, confirming list count `2` and first file selected. Full `pytest tests/test_app.py` was not run because the local brainAtlas `.venv` lacks `pytest`.

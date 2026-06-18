@@ -109,7 +109,22 @@ def test_histogram_stats_return_binned_counts_and_percentile_values():
     assert len(stats.counts) == 10
     assert len(stats.edges) == 11
     assert sum(stats.counts) == 100
+    assert stats.default_low == 0
+    assert stats.default_high == 99
     assert 48 <= histogram_percentile(stats.counts, stats.edges, 50) <= 51
+
+
+def test_histogram_stats_clip_for_raw_intensity_values():
+    volume = np.arange(100, dtype=np.float32)
+    stats = compute_histogram_stats(volume, bins=10)
+
+    clip = stats.clip_for_values(12, 34)
+    crossed = stats.clip_for_values(80, 20)
+
+    assert clip == ClipStats(12, 34)
+    assert crossed.maximum > crossed.minimum
+    assert crossed.minimum >= stats.minimum
+    assert crossed.maximum <= stats.maximum
 
 
 def test_composite_rgb_applies_layer_clip_window():
@@ -158,12 +173,12 @@ def test_composite_rgb_keeps_reference_visible_without_marker_layers():
     np.testing.assert_array_equal(image[:, :, 1], image[:, :, 2])
 
 
-def test_parse_window_overrides_clamps_and_skips_invalid_values():
+def test_parse_window_overrides_preserves_raw_values_and_skips_invalid_values():
     windows = parse_window_overrides(
-        "layer-a:2.5:98.5,layer-b:-1:101,bad,layer-c:4:not-a-number,layer-d:8:3"
+        "layer-a:2.5:98.5,layer-b:-10:4200,bad,layer-c:4:not-a-number,layer-d:8:3"
     )
 
-    assert windows == {"layer-a": (2.5, 98.5), "layer-b": (0.0, 100.0)}
+    assert windows == {"layer-a": (2.5, 98.5), "layer-b": (-10.0, 4200.0)}
 
 
 def test_encode_png_rgb_writes_png_dimensions():

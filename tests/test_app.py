@@ -1,7 +1,13 @@
 from pathlib import Path
 
-from brain_atlas_preprocess.app import PreprocessWorker, _parse_args
-from brain_atlas_preprocess.model import SameFishConfocalProfile, StackFileState
+from PySide6.QtWidgets import QApplication
+
+from brain_atlas_preprocess.app import MainWindow, PreprocessWorker, _parse_args
+from brain_atlas_preprocess.model import ProjectState, SameFishConfocalProfile, StackFileState
+
+
+def _app():
+    return QApplication.instance() or QApplication([])
 
 
 def test_preprocess_worker_uses_file_specific_output_roots_and_profiles(monkeypatch):
@@ -58,3 +64,20 @@ def test_parse_args_rejects_project_with_positional_stacks():
         assert exc.code == 2
     else:
         raise AssertionError("Expected parser to reject mixed project/input launch")
+
+
+def test_main_window_populates_loaded_project_file_list():
+    _app()
+    window = MainWindow(
+        project=ProjectState(
+            files=[
+                StackFileState(path="/tmp/L758_f02.lsm"),
+                StackFileState(path="/tmp/L758_f03.lsm"),
+            ],
+        )
+    )
+
+    assert window.file_list.count() == 2
+    assert window.file_list.item(0).text().startswith("L758_f02.lsm")
+    assert window.current_file is not None
+    assert window.current_file.path == "/tmp/L758_f02.lsm"

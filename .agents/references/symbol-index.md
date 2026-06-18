@@ -60,7 +60,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `MARKER_PALETTE`: viewer marker color cycle.
 - `Layer`: transformed-channel manifest row exposed to the viewer UI.
 - `ClipStats`: per-volume display clipping range.
-- `HistogramStats`: binned layer intensity histogram and percentile-to-clip conversion.
+- `HistogramStats`: binned layer intensity histogram and raw intensity clip conversion.
 - `CompositeLayer`: volume/color/clip bundle for RGB compositing.
 - `VolumeStore`: lazy NRRD loader, LRU cache, and per-layer histogram cache for viewer layers.
 - `load_layers`: transformed-channel manifest loader.
@@ -72,7 +72,7 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `histogram_percentile`: binned percentile-to-intensity conversion helper.
 - `normalize_plane`: brightness/contrast/clip normalization.
 - `composite_rgb`: reference-plus-marker RGB compositor.
-- `parse_window_overrides`: per-layer display-window percentile query parser.
+- `parse_window_overrides`: per-layer raw intensity display-window query parser.
 - `ViewerHandler`: HTTP request handler for page, metadata, histogram JSON, and composite PNGs.
 - `main`: CLI entrypoint target for `brain-atlas-viewer`.
 

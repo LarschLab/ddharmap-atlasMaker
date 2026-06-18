@@ -266,6 +266,8 @@ PAGE_HTML = """<!doctype html>
       background: #171d2a;
       overflow: hidden;
       margin-bottom: 8px;
+      cursor: col-resize;
+      user-select: none;
     }
     .histogram-frame svg {
       width: 100%;
@@ -382,7 +384,9 @@ const state = {
   selectedLayer: null,
   windows: {},
   histograms: {},
+  histogramViews: {},
   pendingHistograms: new Set(),
+  histogramDrag: null,
   coord: {x: 0, y: 0, z: 0},
   brightness: 100,
   contrast: 100,
@@ -399,8 +403,6 @@ const state = {
 
 const planeAxis = { sagittal: "x", coronal: "y", axial: "z" };
 const planes = ["sagittal", "coronal", "axial"];
-const DEFAULT_LOW = 1.0;
-const DEFAULT_HIGH = 99.5;
 
 function qs(name, fallback) {
   const params = new URLSearchParams(window.location.search);
@@ -431,17 +433,21 @@ function layerWindow(id) {
   if (stored) return stored;
   const histogram = state.histograms[id];
   return {
-    low: histogram?.default_low ?? DEFAULT_LOW,
-    high: histogram?.default_high ?? DEFAULT_HIGH
+    low: histogram?.default_low ?? 0,
+    high: histogram?.default_high ?? 1
   };
 }
 
 function setLayerWindow(id, low, high) {
-  low = clamp(Number(low), 0, 100);
-  high = clamp(Number(high), 0, 100);
-  if (high <= low) high = Math.min(100, low + 0.1);
-  if (high <= low) low = Math.max(0, high - 0.1);
-  if (Math.abs(low - DEFAULT_LOW) < 0.0001 && Math.abs(high - DEFAULT_HIGH) < 0.0001) {
+  const histogram = state.histograms[id];
+  const minimum = histogram?.minimum ?? 0;
+  const maximum = histogram?.maximum ?? 1;
+  const minGap = histogram?.minimum_gap ?? Math.max(1e-6, (maximum - minimum) / 240);
+  low = clamp(Number(low), minimum, maximum);
+  high = clamp(Number(high), minimum, maximum);
+  if (high <= low + minGap) high = Math.min(maximum, low + minGap);
+  if (high <= low + minGap) low = Math.max(minimum, high - minGap);
+  if (histogram && Math.abs(low - minimum) < 1e-6 && Math.abs(high - maximum) < 1e-6) {
     delete state.windows[id];
   } else {
     state.windows[id] = {low, high};
@@ -450,8 +456,8 @@ function setLayerWindow(id, low, high) {
 
 function windowParam() {
   return Object.entries(state.windows)
-    .filter(([, window]) => Number(window.low) >= 0 && Number(window.high) > Number(window.low))
-    .map(([id, window]) => `${id}:${Number(window.low).toFixed(1)}:${Number(window.high).toFixed(1)}`)
+    .filter(([, window]) => Number.isFinite(Number(window.low)) && Number(window.high) > Number(window.low))
+    .map(([id, window]) => `${id}:${formatWindowParam(window.low)}:${formatWindowParam(window.high)}`)
     .join(",");
 }
 
@@ -461,13 +467,76 @@ function parseWindowParam(value) {
     const parts = item.split(":");
     if (parts.length !== 3) continue;
     const [id, rawLow, rawHigh] = parts;
-    const low = clamp(Number(rawLow), 0, 100);
-    const high = clamp(Number(rawHigh), 0, 100);
+    const low = Number(rawLow);
+    const high = Number(rawHigh);
     if (id && Number.isFinite(low) && Number.isFinite(high) && high > low) {
       windows[id] = {low, high};
     }
   }
   return windows;
+}
+
+function histogramView(id) {
+  const histogram = state.histograms[id];
+  if (!histogram) return {min: 0, max: 1};
+  const view = state.histogramViews[id];
+  if (view) return view;
+  return {min: histogram.minimum, max: histogram.maximum};
+}
+
+function setHistogramView(id, min, max) {
+  const histogram = state.histograms[id];
+  if (!histogram) return;
+  const fullMin = histogram.minimum;
+  const fullMax = histogram.maximum;
+  const fullRange = Math.max(1e-9, fullMax - fullMin);
+  const minRange = fullRange / 1000;
+  if (max - min < minRange) {
+    const center = (min + max) / 2;
+    min = center - minRange / 2;
+    max = center + minRange / 2;
+  }
+  if (min < fullMin) {
+    max += fullMin - min;
+    min = fullMin;
+  }
+  if (max > fullMax) {
+    min -= max - fullMax;
+    max = fullMax;
+  }
+  min = clamp(min, fullMin, fullMax);
+  max = clamp(max, fullMin, fullMax);
+  if (Math.abs(min - fullMin) < 1e-6 && Math.abs(max - fullMax) < 1e-6) {
+    delete state.histogramViews[id];
+  } else {
+    state.histogramViews[id] = {min, max};
+  }
+}
+
+function fitHistogramView(id) {
+  delete state.histogramViews[id];
+}
+
+function fullRangeWindow(id) {
+  const histogram = state.histograms[id];
+  if (!histogram) return;
+  delete state.windows[id];
+}
+
+function formatWindowParam(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  return Number.isInteger(number) ? String(number) : number.toPrecision(8).replace(/\.?0+$/, "");
+}
+
+function formatIntensity(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "0";
+  if (Math.abs(number - Math.round(number)) < 1e-6) return String(Math.round(number));
+  const abs = Math.abs(number);
+  if (abs >= 100) return number.toFixed(1).replace(/\.0$/, "");
+  if (abs >= 1) return number.toFixed(2).replace(/0+$/, "").replace(/\.$/, "");
+  return number.toPrecision(3).replace(/\.?0+$/, "");
 }
 
 function debouncedRenderImages() {
@@ -668,50 +737,27 @@ function renderLayerSettings() {
     <div class="meta">${escapeHtml(layer.registered_subject)}</div>
     <div class="window-header">
       <div class="window-title">Intensity window</div>
-      <div class="window-readout"><span id="window-low-value">${window.low.toFixed(1)}</span>% - <span id="window-high-value">${window.high.toFixed(1)}</span>%</div>
+      <div class="window-readout"><span id="window-low-value">${formatIntensity(window.low)}</span> - <span id="window-high-value">${formatIntensity(window.high)}</span></div>
     </div>
     <div id="histogram-wrap" class="histogram-frame">${histogram ? histogramSvg(histogram, window, layer.color) : `<div class="meta" style="padding:20px 10px;">Loading histogram...</div>`}</div>
-    <div class="window-slider-row">
-      <label for="window-low">Low</label>
-      <input id="window-low" type="range" min="0" max="99.9" step="0.1" value="${window.low}">
-      <output id="window-low-output">${window.low.toFixed(1)}%</output>
-    </div>
-    <div class="window-slider-row">
-      <label for="window-high">High</label>
-      <input id="window-high" type="range" min="0.1" max="100" step="0.1" value="${window.high}">
-      <output id="window-high-output">${window.high.toFixed(1)}%</output>
-    </div>
+    <div class="meta">Left-drag bounds. Wheel zooms X. Right-drag pans.</div>
     <div class="window-buttons">
-      <button id="window-auto">Auto p1-p99.5</button>
-      <button id="window-reset">Reset</button>
+      <button id="window-fit-view">Fit view</button>
+      <button id="window-full-range">Full range</button>
     </div>
   `;
-  const updateLow = event => {
-    const current = layerWindow(layer.id);
-    setLayerWindow(layer.id, event.target.value, current.high);
-    updateWindowDisplay(layer);
-    debouncedRenderImages();
-    updateStatus();
-  };
-  const updateHigh = event => {
-    const current = layerWindow(layer.id);
-    setLayerWindow(layer.id, current.low, event.target.value);
-    updateWindowDisplay(layer);
-    debouncedRenderImages();
-    updateStatus();
-  };
-  document.getElementById("window-low").addEventListener("input", updateLow);
-  document.getElementById("window-low").addEventListener("change", updateLow);
-  document.getElementById("window-high").addEventListener("input", updateHigh);
-  document.getElementById("window-high").addEventListener("change", updateHigh);
-  document.getElementById("window-auto").addEventListener("click", () => {
-    setLayerWindow(layer.id, DEFAULT_LOW, DEFAULT_HIGH);
+  const histogramWrap = document.getElementById("histogram-wrap");
+  histogramWrap.addEventListener("contextmenu", event => event.preventDefault());
+  histogramWrap.addEventListener("mousedown", event => handleHistogramMouseDown(layer, event));
+  histogramWrap.addEventListener("wheel", event => handleHistogramWheel(layer, event), {passive: false});
+  document.getElementById("window-fit-view").addEventListener("click", () => {
+    fitHistogramView(layer.id);
     renderLayerSettings();
-    renderImages();
     updateStatus();
   });
-  document.getElementById("window-reset").addEventListener("click", () => {
-    setLayerWindow(layer.id, DEFAULT_LOW, DEFAULT_HIGH);
+  document.getElementById("window-full-range").addEventListener("click", () => {
+    fullRangeWindow(layer.id);
+    fitHistogramView(layer.id);
     renderLayerSettings();
     renderImages();
     updateStatus();
@@ -720,15 +766,9 @@ function renderLayerSettings() {
 
 function updateWindowDisplay(layer) {
   const window = layerWindow(layer.id);
-  const lowInput = document.getElementById("window-low");
-  const highInput = document.getElementById("window-high");
-  if (lowInput) lowInput.value = window.low;
-  if (highInput) highInput.value = window.high;
   for (const [id, value] of [
-    ["window-low-value", `${window.low.toFixed(1)}`],
-    ["window-high-value", `${window.high.toFixed(1)}`],
-    ["window-low-output", `${window.low.toFixed(1)}%`],
-    ["window-high-output", `${window.high.toFixed(1)}%`]
+    ["window-low-value", formatIntensity(window.low)],
+    ["window-high-value", formatIntensity(window.high)]
   ]) {
     const element = document.getElementById(id);
     if (element) element.textContent = value;
@@ -759,18 +799,20 @@ function histogramSvg(histogram, window, color) {
   const width = 240;
   const height = 58;
   const plotBottom = 52;
-  const barWidth = width / Math.max(1, counts.length);
-  const minValue = Number(histogram.minimum ?? edges[0] ?? 0);
-  const maxValue = Number(histogram.maximum ?? edges[edges.length - 1] ?? 1);
-  const range = Math.max(1e-9, maxValue - minValue);
-  const lowValue = histogramPercentile(histogram, window.low);
-  const highValue = histogramPercentile(histogram, window.high);
-  const lowX = clamp((lowValue - minValue) / range * width, 0, width);
-  const highX = clamp((highValue - minValue) / range * width, 0, width);
+  const view = histogramView(state.selectedLayer);
+  const range = Math.max(1e-9, view.max - view.min);
+  const lowX = intensityToHistogramX(window.low, view, width);
+  const highX = intensityToHistogramX(window.high, view, width);
   const bars = counts.map((count, index) => {
+    const left = Number(edges[index]);
+    const right = Number(edges[index + 1]);
+    if (right < view.min || left > view.max) return "";
+    const clippedLeft = clamp(left, view.min, view.max);
+    const clippedRight = clamp(right, view.min, view.max);
+    const x = (clippedLeft - view.min) / range * width;
+    const barWidth = Math.max(1, (clippedRight - clippedLeft) / range * width - 0.4);
     const barHeight = Math.max(1, Number(count) / maxCount * 44);
-    const x = index * barWidth;
-    return `<rect x="${x.toFixed(2)}" y="${(plotBottom - barHeight).toFixed(2)}" width="${Math.max(1, barWidth - 0.4).toFixed(2)}" height="${barHeight.toFixed(2)}" fill="${escapeHtml(color)}" opacity="0.72"></rect>`;
+    return `<rect x="${x.toFixed(2)}" y="${(plotBottom - barHeight).toFixed(2)}" width="${barWidth.toFixed(2)}" height="${barHeight.toFixed(2)}" fill="${escapeHtml(color)}" opacity="0.72"></rect>`;
   }).join("");
   return `
     <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Intensity histogram">
@@ -778,28 +820,110 @@ function histogramSvg(histogram, window, color) {
       ${bars}
       <rect x="0" y="0" width="${lowX.toFixed(2)}" height="${height}" fill="#05070b" opacity="0.58"></rect>
       <rect x="${highX.toFixed(2)}" y="0" width="${Math.max(0, width - highX).toFixed(2)}" height="${height}" fill="#05070b" opacity="0.58"></rect>
-      <line x1="${lowX.toFixed(2)}" y1="3" x2="${lowX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="2"></line>
-      <line x1="${highX.toFixed(2)}" y1="3" x2="${highX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="2"></line>
+      <line x1="${lowX.toFixed(2)}" y1="3" x2="${lowX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="3"></line>
+      <line x1="${highX.toFixed(2)}" y1="3" x2="${highX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="3"></line>
+      <rect x="${(lowX - 4).toFixed(2)}" y="0" width="8" height="${height}" fill="transparent"></rect>
+      <rect x="${(highX - 4).toFixed(2)}" y="0" width="8" height="${height}" fill="transparent"></rect>
     </svg>`;
 }
 
-function histogramPercentile(histogram, percentile) {
-  const counts = histogram.counts || [];
-  const edges = histogram.edges || [];
-  const total = counts.reduce((sum, value) => sum + Number(value), 0);
-  if (!total || edges.length < 2) return Number(edges[0] ?? 0);
-  const target = clamp(Number(percentile), 0, 100) / 100 * total;
-  let cumulative = 0;
-  for (let index = 0; index < counts.length; index += 1) {
-    const count = Number(counts[index]);
-    const next = cumulative + count;
-    if (target <= next) {
-      const fraction = count > 0 ? (target - cumulative) / count : 0;
-      return Number(edges[index]) + (Number(edges[index + 1]) - Number(edges[index])) * fraction;
-    }
-    cumulative = next;
+function intensityToHistogramX(value, view, width) {
+  return clamp((Number(value) - view.min) / Math.max(1e-9, view.max - view.min) * width, 0, width);
+}
+
+function histogramXToIntensity(x, rect, view) {
+  const fraction = clamp((x - rect.left) / Math.max(1, rect.width), 0, 1);
+  return view.min + fraction * (view.max - view.min);
+}
+
+function nearestHistogramHandle(layer, event) {
+  const histogram = state.histograms[layer.id];
+  if (!histogram) return null;
+  const rect = event.currentTarget.getBoundingClientRect();
+  const view = histogramView(layer.id);
+  const width = 240;
+  const window = layerWindow(layer.id);
+  const lowScreenX = rect.left + intensityToHistogramX(window.low, view, width) / width * rect.width;
+  const highScreenX = rect.left + intensityToHistogramX(window.high, view, width) / width * rect.width;
+  const lowDistance = Math.abs(event.clientX - lowScreenX);
+  const highDistance = Math.abs(event.clientX - highScreenX);
+  if (Math.min(lowDistance, highDistance) > 12) return null;
+  return lowDistance <= highDistance ? "low" : "high";
+}
+
+function handleHistogramMouseDown(layer, event) {
+  const histogram = state.histograms[layer.id];
+  if (!histogram) return;
+  event.preventDefault();
+  const rect = event.currentTarget.getBoundingClientRect();
+  if (event.button === 2) {
+    const view = histogramView(layer.id);
+    state.histogramDrag = {
+      mode: "pan",
+      layerId: layer.id,
+      startX: event.clientX,
+      startMin: view.min,
+      startMax: view.max
+    };
+  } else if (event.button === 0) {
+    const handle = nearestHistogramHandle(layer, event);
+    if (!handle) return;
+    state.histogramDrag = {mode: handle, layerId: layer.id};
+    updateWindowFromHistogramDrag(layer, rect, event.clientX);
   }
-  return Number(edges[edges.length - 1]);
+  window.addEventListener("mousemove", handleHistogramMouseMove);
+  window.addEventListener("mouseup", handleHistogramMouseUp, {once: true});
+}
+
+function handleHistogramMouseMove(event) {
+  const drag = state.histogramDrag;
+  if (!drag) return;
+  const layer = layerById(drag.layerId);
+  const histogram = state.histograms[drag.layerId];
+  const wrap = document.getElementById("histogram-wrap");
+  if (!layer || !histogram || !wrap) return;
+  const rect = wrap.getBoundingClientRect();
+  if (drag.mode === "pan") {
+    const startRange = drag.startMax - drag.startMin;
+    const deltaValue = -(event.clientX - drag.startX) / Math.max(1, rect.width) * startRange;
+    setHistogramView(drag.layerId, drag.startMin + deltaValue, drag.startMax + deltaValue);
+    updateWindowDisplay(layer);
+    return;
+  }
+  updateWindowFromHistogramDrag(layer, rect, event.clientX);
+}
+
+function handleHistogramMouseUp() {
+  state.histogramDrag = null;
+  window.removeEventListener("mousemove", handleHistogramMouseMove);
+}
+
+function updateWindowFromHistogramDrag(layer, rect, clientX) {
+  const view = histogramView(layer.id);
+  const value = histogramXToIntensity(clientX, rect, view);
+  const current = layerWindow(layer.id);
+  if (state.histogramDrag?.mode === "low") {
+    setLayerWindow(layer.id, value, current.high);
+  } else if (state.histogramDrag?.mode === "high") {
+    setLayerWindow(layer.id, current.low, value);
+  }
+  updateWindowDisplay(layer);
+  debouncedRenderImages();
+  updateStatus();
+}
+
+function handleHistogramWheel(layer, event) {
+  const histogram = state.histograms[layer.id];
+  if (!histogram) return;
+  event.preventDefault();
+  const rect = event.currentTarget.getBoundingClientRect();
+  const view = histogramView(layer.id);
+  const focus = histogramXToIntensity(event.clientX, rect, view);
+  const zoom = event.deltaY < 0 ? 0.82 : 1.22;
+  const nextMin = focus - (focus - view.min) * zoom;
+  const nextMax = focus + (view.max - focus) * zoom;
+  setHistogramView(layer.id, nextMin, nextMax);
+  updateWindowDisplay(layer);
 }
 
 function renderRunMeta() {
@@ -1084,16 +1208,20 @@ class HistogramStats:
     default_low: float
     default_high: float
 
-    def clip_for_percentiles(self, low: float, high: float) -> ClipStats:
-        low = max(0.0, min(100.0, low))
-        high = max(0.0, min(100.0, high))
+    def clip_for_values(self, low: float, high: float) -> ClipStats:
+        low = max(self.minimum, min(self.maximum, low))
+        high = max(self.minimum, min(self.maximum, high))
         if high <= low:
-            high = min(100.0, low + 0.1)
-        minimum = histogram_percentile(self.counts, self.edges, low)
-        maximum = histogram_percentile(self.counts, self.edges, high)
-        if maximum <= minimum:
-            maximum = minimum + 1.0
-        return ClipStats(minimum, maximum)
+            high = min(self.maximum, low + self.minimum_gap)
+        if high <= low:
+            low = max(self.minimum, high - self.minimum_gap)
+        return ClipStats(low, high)
+
+    @property
+    def minimum_gap(self) -> float:
+        if len(self.edges) >= 2:
+            return max(1e-6, float(self.edges[1] - self.edges[0]))
+        return max(1e-6, (self.maximum - self.minimum) / 1024.0)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -1103,6 +1231,7 @@ class HistogramStats:
             "maximum": self.maximum,
             "default_low": self.default_low,
             "default_high": self.default_high,
+            "minimum_gap": self.minimum_gap,
         }
 
 
@@ -1148,8 +1277,13 @@ class VolumeStore:
                 return cached
             layer = self._layers[layer_id]
             data = self._read_volume(layer.output)
-            cached = CachedVolume(data=data, clip=compute_clip_stats(data))
+            histogram = compute_histogram_stats(data)
+            cached = CachedVolume(
+                data=data,
+                clip=ClipStats(histogram.minimum, histogram.maximum),
+            )
             self._cache[layer_id] = cached
+            self._histograms[layer_id] = histogram
             self._cache.move_to_end(layer_id)
             while len(self._cache) > self._max_volumes:
                 evicted_id, _cached = self._cache.popitem(last=False)
@@ -1305,13 +1439,11 @@ def compute_clip_stats(
 def compute_histogram_stats(
     volume: np.ndarray,
     bins: int = 128,
-    default_low: float = 1.0,
-    default_high: float = 99.5,
 ) -> HistogramStats:
     finite = np.asarray(volume, dtype=np.float32)
     finite = finite[np.isfinite(finite)]
     if finite.size == 0:
-        return HistogramStats((0,), (0.0, 1.0), 0.0, 1.0, default_low, default_high)
+        return HistogramStats((0,), (0.0, 1.0), 0.0, 1.0, 0.0, 1.0)
     minimum = float(np.min(finite))
     maximum = float(np.max(finite))
     if maximum <= minimum:
@@ -1322,8 +1454,8 @@ def compute_histogram_stats(
         tuple(float(value) for value in edges),
         minimum,
         maximum,
-        default_low,
-        default_high,
+        minimum,
+        maximum,
     )
 
 
@@ -1445,8 +1577,6 @@ def parse_window_overrides(raw_value: str) -> dict[str, tuple[float, float]]:
             high = float(raw_high)
         except ValueError:
             continue
-        low = max(0.0, min(100.0, low))
-        high = max(0.0, min(100.0, high))
         if high <= low:
             continue
         windows[layer_id] = (low, high)
@@ -1520,7 +1650,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
             clip = cached.clip
             window = windows.get(layer_id)
             if window is not None:
-                clip = self.store.get_histogram(layer_id).clip_for_percentiles(*window)
+                clip = self.store.get_histogram(layer_id).clip_for_values(*window)
             layer = self.layer_by_id[layer_id]
             volumes.append(
                 CompositeLayer(

@@ -285,7 +285,10 @@ class MainWindow(QMainWindow):
         self._build_layout()
         self._install_shortcuts()
         self.preview.set_crop_size(self.project.crop_size_px)
+        self._refresh_file_list()
         self._update_output_label()
+        if self.file_list.count():
+            self.file_list.setCurrentRow(0)
 
     def _build_layout(self) -> None:
         add_files = QPushButton("Add Stacks")

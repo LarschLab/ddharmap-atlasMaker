@@ -18,7 +18,7 @@ Purpose: compact ownership and contract reference for the registered atlas viewe
 - Viewer serves lazy per-layer histogram metadata at `/api/histogram?layer=<id>`.
 - Volumes are read as 3-D NRRD with `index_order="C"` and flipped on Z for display via `orient_volume_for_display`.
 - Layer colors are assigned by sorted marker name using `MARKER_PALETTE`.
-- Per-layer display windows are parsed from the `windows` query parameter as `layer_id:low_percentile:high_percentile`.
+- Per-layer display windows are parsed from the `windows` query parameter as `layer_id:low_intensity:high_intensity`.
 - Display windowing is viewer-only; do not write window settings to NRRD files, manifests, or preprocessing outputs.
 
 ## Edit Rules
