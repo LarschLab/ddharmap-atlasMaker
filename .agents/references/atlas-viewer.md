@@ -15,9 +15,11 @@ Purpose: compact ownership and contract reference for the registered atlas viewe
 - Compatibility script path: `python scripts/registered_atlas_viewer.py`.
 - Manifest filename: `observed_channel_transform_manifest.csv`.
 - Viewer serves HTML at `/`, metadata at `/api/metadata`, and RGB composite PNGs at `/api/composite`.
+- Viewer serves lazy per-layer histogram metadata at `/api/histogram?layer=<id>`.
 - Volumes are read as 3-D NRRD with `index_order="C"` and flipped on Z for display via `orient_volume_for_display`.
 - Layer colors are assigned by sorted marker name using `MARKER_PALETTE`.
-- Per-layer gain is parsed from the `gains` query parameter and clamped to `0.0..5.0`.
+- Per-layer display windows are parsed from the `windows` query parameter as `layer_id:low_percentile:high_percentile`.
+- Display windowing is viewer-only; do not write window settings to NRRD files, manifests, or preprocessing outputs.
 
 ## Edit Rules
 

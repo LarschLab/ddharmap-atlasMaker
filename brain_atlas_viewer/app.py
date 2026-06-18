@@ -5,7 +5,6 @@ import argparse
 import csv
 import html
 import json
-import math
 import re
 import struct
 import threading
@@ -169,7 +168,7 @@ PAGE_HTML = """<!doctype html>
       display: flex;
       flex-direction: column;
       gap: 4px;
-      max-height: 58vh;
+      max-height: 352px;
       overflow-y: auto;
       padding-right: 2px;
     }
@@ -241,6 +240,60 @@ PAGE_HTML = """<!doctype html>
       text-align: right;
       color: #dbe8ff;
       font-variant-numeric: tabular-nums;
+    }
+    .window-header {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 8px;
+      margin: 10px 0 6px;
+    }
+    .window-title {
+      font-weight: 800;
+      color: #f1f6ff;
+    }
+    .window-readout {
+      color: #dbe8ff;
+      font-size: .78rem;
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+    }
+    .histogram-frame {
+      position: relative;
+      height: 62px;
+      border: 1px solid #35435e;
+      border-radius: 7px;
+      background: #171d2a;
+      overflow: hidden;
+      margin-bottom: 8px;
+    }
+    .histogram-frame svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+    .window-slider-row {
+      display: grid;
+      grid-template-columns: 38px 1fr 46px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .window-slider-row label,
+    .window-slider-row output {
+      font-size: .78rem;
+      color: #c8d8f4;
+      font-variant-numeric: tabular-nums;
+    }
+    .window-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .window-buttons button {
+      min-height: 30px;
+      padding: 4px 8px;
     }
     #slices {
       min-width: 0;
@@ -327,7 +380,9 @@ const state = {
   metadata: null,
   active: new Set(),
   selectedLayer: null,
-  gains: {},
+  windows: {},
+  histograms: {},
+  pendingHistograms: new Set(),
   coord: {x: 0, y: 0, z: 0},
   brightness: 100,
   contrast: 100,
@@ -338,11 +393,14 @@ const state = {
   scale: 1,
   userScaled: false,
   focusedPlane: "sagittal",
-  query: ""
+  query: "",
+  renderTimer: null
 };
 
 const planeAxis = { sagittal: "x", coronal: "y", axial: "z" };
 const planes = ["sagittal", "coronal", "axial"];
+const DEFAULT_LOW = 1.0;
+const DEFAULT_HIGH = 99.5;
 
 function qs(name, fallback) {
   const params = new URLSearchParams(window.location.search);
@@ -368,26 +426,53 @@ function activeLabels() {
   });
 }
 
-function layerGain(id) {
-  return Number(state.gains[id] ?? 1);
+function layerWindow(id) {
+  const stored = state.windows[id];
+  if (stored) return stored;
+  const histogram = state.histograms[id];
+  return {
+    low: histogram?.default_low ?? DEFAULT_LOW,
+    high: histogram?.default_high ?? DEFAULT_HIGH
+  };
 }
 
-function gainParam() {
-  return Object.entries(state.gains)
-    .filter(([, gain]) => Math.abs(Number(gain) - 1) > 0.0001)
-    .map(([id, gain]) => `${id}:${Number(gain).toFixed(2)}`)
+function setLayerWindow(id, low, high) {
+  low = clamp(Number(low), 0, 100);
+  high = clamp(Number(high), 0, 100);
+  if (high <= low) high = Math.min(100, low + 0.1);
+  if (high <= low) low = Math.max(0, high - 0.1);
+  if (Math.abs(low - DEFAULT_LOW) < 0.0001 && Math.abs(high - DEFAULT_HIGH) < 0.0001) {
+    delete state.windows[id];
+  } else {
+    state.windows[id] = {low, high};
+  }
+}
+
+function windowParam() {
+  return Object.entries(state.windows)
+    .filter(([, window]) => Number(window.low) >= 0 && Number(window.high) > Number(window.low))
+    .map(([id, window]) => `${id}:${Number(window.low).toFixed(1)}:${Number(window.high).toFixed(1)}`)
     .join(",");
 }
 
-function parseGainParam(value) {
-  const gains = {};
+function parseWindowParam(value) {
+  const windows = {};
   for (const item of String(value || "").split(",")) {
-    const [id, rawGain] = item.split(":");
-    if (!id || rawGain === undefined) continue;
-    const gain = clamp(Number(rawGain), 0, 5);
-    if (Number.isFinite(gain)) gains[id] = gain;
+    const parts = item.split(":");
+    if (parts.length !== 3) continue;
+    const [id, rawLow, rawHigh] = parts;
+    const low = clamp(Number(rawLow), 0, 100);
+    const high = clamp(Number(rawHigh), 0, 100);
+    if (id && Number.isFinite(low) && Number.isFinite(high) && high > low) {
+      windows[id] = {low, high};
+    }
   }
-  return gains;
+  return windows;
+}
+
+function debouncedRenderImages() {
+  clearTimeout(state.renderTimer);
+  state.renderTimer = setTimeout(renderImages, 120);
 }
 
 function planeIndex(plane) {
@@ -403,7 +488,7 @@ function imageUrl(plane) {
     brightness: String(state.brightness),
     contrast: String(state.contrast),
     opacity: String(state.opacity / 100),
-    gains: gainParam(),
+    windows: windowParam(),
     mip: state.mip ? "1" : "0",
     ref: "fixed-dapi-v1"
   });
@@ -572,26 +657,149 @@ function renderLayerSettings() {
   const panel = document.getElementById("layer-settings");
   const layer = state.selectedLayer ? layerById(state.selectedLayer) : null;
   if (!layer) {
-    panel.innerHTML = `<div class="meta">Select a layer to adjust its gain.</div>`;
+    panel.innerHTML = `<div class="meta">Select a layer to adjust its display window.</div>`;
     return;
   }
-  const gain = layerGain(layer.id);
+  const window = layerWindow(layer.id);
+  const histogram = state.histograms[layer.id];
+  if (!histogram && !state.pendingHistograms.has(layer.id)) fetchLayerHistogram(layer.id);
   panel.innerHTML = `
     <div class="layer-title">${escapeHtml(layer.marker)} ${escapeHtml(layer.wavelength)}</div>
     <div class="meta">${escapeHtml(layer.registered_subject)}</div>
-    <div class="meta">Clip: stack p1-p99.5; Gain: <span id="layer-gain-value">${gain.toFixed(2)}x</span></div>
-    <div class="control-row">
-      <label>Layer gain</label>
-      <input id="layer-gain" type="range" min="0" max="5" step="0.05" value="${gain}">
+    <div class="window-header">
+      <div class="window-title">Intensity window</div>
+      <div class="window-readout"><span id="window-low-value">${window.low.toFixed(1)}</span>% - <span id="window-high-value">${window.high.toFixed(1)}</span>%</div>
+    </div>
+    <div id="histogram-wrap" class="histogram-frame">${histogram ? histogramSvg(histogram, window, layer.color) : `<div class="meta" style="padding:20px 10px;">Loading histogram...</div>`}</div>
+    <div class="window-slider-row">
+      <label for="window-low">Low</label>
+      <input id="window-low" type="range" min="0" max="99.9" step="0.1" value="${window.low}">
+      <output id="window-low-output">${window.low.toFixed(1)}%</output>
+    </div>
+    <div class="window-slider-row">
+      <label for="window-high">High</label>
+      <input id="window-high" type="range" min="0.1" max="100" step="0.1" value="${window.high}">
+      <output id="window-high-output">${window.high.toFixed(1)}%</output>
+    </div>
+    <div class="window-buttons">
+      <button id="window-auto">Auto p1-p99.5</button>
+      <button id="window-reset">Reset</button>
     </div>
   `;
-  document.getElementById("layer-gain").addEventListener("input", event => {
-    const nextGain = clamp(Number(event.target.value), 0, 5);
-    state.gains[layer.id] = nextGain;
-    document.getElementById("layer-gain-value").textContent = `${nextGain.toFixed(2)}x`;
+  const updateLow = event => {
+    const current = layerWindow(layer.id);
+    setLayerWindow(layer.id, event.target.value, current.high);
+    updateWindowDisplay(layer);
+    debouncedRenderImages();
+    updateStatus();
+  };
+  const updateHigh = event => {
+    const current = layerWindow(layer.id);
+    setLayerWindow(layer.id, current.low, event.target.value);
+    updateWindowDisplay(layer);
+    debouncedRenderImages();
+    updateStatus();
+  };
+  document.getElementById("window-low").addEventListener("input", updateLow);
+  document.getElementById("window-low").addEventListener("change", updateLow);
+  document.getElementById("window-high").addEventListener("input", updateHigh);
+  document.getElementById("window-high").addEventListener("change", updateHigh);
+  document.getElementById("window-auto").addEventListener("click", () => {
+    setLayerWindow(layer.id, DEFAULT_LOW, DEFAULT_HIGH);
+    renderLayerSettings();
     renderImages();
     updateStatus();
   });
+  document.getElementById("window-reset").addEventListener("click", () => {
+    setLayerWindow(layer.id, DEFAULT_LOW, DEFAULT_HIGH);
+    renderLayerSettings();
+    renderImages();
+    updateStatus();
+  });
+}
+
+function updateWindowDisplay(layer) {
+  const window = layerWindow(layer.id);
+  const lowInput = document.getElementById("window-low");
+  const highInput = document.getElementById("window-high");
+  if (lowInput) lowInput.value = window.low;
+  if (highInput) highInput.value = window.high;
+  for (const [id, value] of [
+    ["window-low-value", `${window.low.toFixed(1)}`],
+    ["window-high-value", `${window.high.toFixed(1)}`],
+    ["window-low-output", `${window.low.toFixed(1)}%`],
+    ["window-high-output", `${window.high.toFixed(1)}%`]
+  ]) {
+    const element = document.getElementById(id);
+    if (element) element.textContent = value;
+  }
+  const histogram = state.histograms[layer.id];
+  const wrap = document.getElementById("histogram-wrap");
+  if (histogram && wrap) wrap.innerHTML = histogramSvg(histogram, window, layer.color);
+}
+
+async function fetchLayerHistogram(layerId) {
+  state.pendingHistograms.add(layerId);
+  try {
+    const response = await fetch(`/api/histogram?layer=${encodeURIComponent(layerId)}`);
+    if (!response.ok) throw new Error(`Histogram request failed: ${response.status}`);
+    state.histograms[layerId] = await response.json();
+  } catch (error) {
+    showError(String(error));
+  } finally {
+    state.pendingHistograms.delete(layerId);
+  }
+  if (state.selectedLayer === layerId) renderLayerSettings();
+}
+
+function histogramSvg(histogram, window, color) {
+  const counts = histogram.counts || [];
+  const edges = histogram.edges || [];
+  const maxCount = Math.max(1, ...counts);
+  const width = 240;
+  const height = 58;
+  const plotBottom = 52;
+  const barWidth = width / Math.max(1, counts.length);
+  const minValue = Number(histogram.minimum ?? edges[0] ?? 0);
+  const maxValue = Number(histogram.maximum ?? edges[edges.length - 1] ?? 1);
+  const range = Math.max(1e-9, maxValue - minValue);
+  const lowValue = histogramPercentile(histogram, window.low);
+  const highValue = histogramPercentile(histogram, window.high);
+  const lowX = clamp((lowValue - minValue) / range * width, 0, width);
+  const highX = clamp((highValue - minValue) / range * width, 0, width);
+  const bars = counts.map((count, index) => {
+    const barHeight = Math.max(1, Number(count) / maxCount * 44);
+    const x = index * barWidth;
+    return `<rect x="${x.toFixed(2)}" y="${(plotBottom - barHeight).toFixed(2)}" width="${Math.max(1, barWidth - 0.4).toFixed(2)}" height="${barHeight.toFixed(2)}" fill="${escapeHtml(color)}" opacity="0.72"></rect>`;
+  }).join("");
+  return `
+    <svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" aria-label="Intensity histogram">
+      <rect x="0" y="0" width="${width}" height="${height}" fill="#171d2a"></rect>
+      ${bars}
+      <rect x="0" y="0" width="${lowX.toFixed(2)}" height="${height}" fill="#05070b" opacity="0.58"></rect>
+      <rect x="${highX.toFixed(2)}" y="0" width="${Math.max(0, width - highX).toFixed(2)}" height="${height}" fill="#05070b" opacity="0.58"></rect>
+      <line x1="${lowX.toFixed(2)}" y1="3" x2="${lowX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="2"></line>
+      <line x1="${highX.toFixed(2)}" y1="3" x2="${highX.toFixed(2)}" y2="${height - 3}" stroke="#dbe8ff" stroke-width="2"></line>
+    </svg>`;
+}
+
+function histogramPercentile(histogram, percentile) {
+  const counts = histogram.counts || [];
+  const edges = histogram.edges || [];
+  const total = counts.reduce((sum, value) => sum + Number(value), 0);
+  if (!total || edges.length < 2) return Number(edges[0] ?? 0);
+  const target = clamp(Number(percentile), 0, 100) / 100 * total;
+  let cumulative = 0;
+  for (let index = 0; index < counts.length; index += 1) {
+    const count = Number(counts[index]);
+    const next = cumulative + count;
+    if (target <= next) {
+      const fraction = count > 0 ? (target - cumulative) / count : 0;
+      return Number(edges[index]) + (Number(edges[index + 1]) - Number(edges[index])) * fraction;
+    }
+    cumulative = next;
+  }
+  return Number(edges[edges.length - 1]);
 }
 
 function renderRunMeta() {
@@ -736,7 +944,7 @@ function resetView() {
   state.brightness = 100;
   state.contrast = 100;
   state.opacity = 75;
-  state.gains = {};
+  state.windows = {};
   state.mip = false;
   state.userScaled = false;
   document.getElementById("brightness").value = state.brightness;
@@ -757,7 +965,7 @@ function shareView() {
     brightness: String(state.brightness),
     contrast: String(state.contrast),
     opacity: String(state.opacity),
-    gains: gainParam(),
+    windows: windowParam(),
     mip: state.mip ? "1" : "0"
   });
   const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
@@ -808,7 +1016,7 @@ async function boot() {
   state.brightness = Number(qs("brightness", state.brightness));
   state.contrast = Number(qs("contrast", state.contrast));
   state.opacity = Number(qs("opacity", state.opacity));
-  state.gains = parseGainParam(qs("gains", ""));
+  state.windows = parseWindowParam(qs("windows", ""));
   state.mip = qs("mip", "0") === "1";
   const params = new URLSearchParams(window.location.search);
   const hasLayerParam = params.has("layers");
@@ -868,6 +1076,37 @@ class ClipStats:
 
 
 @dataclass(frozen=True)
+class HistogramStats:
+    counts: tuple[int, ...]
+    edges: tuple[float, ...]
+    minimum: float
+    maximum: float
+    default_low: float
+    default_high: float
+
+    def clip_for_percentiles(self, low: float, high: float) -> ClipStats:
+        low = max(0.0, min(100.0, low))
+        high = max(0.0, min(100.0, high))
+        if high <= low:
+            high = min(100.0, low + 0.1)
+        minimum = histogram_percentile(self.counts, self.edges, low)
+        maximum = histogram_percentile(self.counts, self.edges, high)
+        if maximum <= minimum:
+            maximum = minimum + 1.0
+        return ClipStats(minimum, maximum)
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "counts": list(self.counts),
+            "edges": list(self.edges),
+            "minimum": self.minimum,
+            "maximum": self.maximum,
+            "default_low": self.default_low,
+            "default_high": self.default_high,
+        }
+
+
+@dataclass(frozen=True)
 class CachedVolume:
     data: np.ndarray
     clip: ClipStats
@@ -878,7 +1117,6 @@ class CompositeLayer:
     volume: np.ndarray
     color: str
     clip: ClipStats
-    gain: float = 1.0
 
 
 class VolumeStore:
@@ -894,6 +1132,7 @@ class VolumeStore:
         self._max_volumes = max(1, max_volumes)
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, CachedVolume] = OrderedDict()
+        self._histograms: dict[str, HistogramStats] = {}
 
     def get_reference(self) -> np.ndarray:
         with self._lock:
@@ -913,8 +1152,20 @@ class VolumeStore:
             self._cache[layer_id] = cached
             self._cache.move_to_end(layer_id)
             while len(self._cache) > self._max_volumes:
-                self._cache.popitem(last=False)
+                evicted_id, _cached = self._cache.popitem(last=False)
+                self._histograms.pop(evicted_id, None)
             return cached
+
+    def get_histogram(self, layer_id: str) -> HistogramStats:
+        with self._lock:
+            histogram = self._histograms.get(layer_id)
+        if histogram is not None:
+            return histogram
+        cached = self.get(layer_id)
+        histogram = compute_histogram_stats(cached.data)
+        with self._lock:
+            self._histograms[layer_id] = histogram
+        return histogram
 
     @staticmethod
     def _read_volume(path: Path) -> np.ndarray:
@@ -1051,6 +1302,52 @@ def compute_clip_stats(
     return ClipStats(float(minimum), float(maximum))
 
 
+def compute_histogram_stats(
+    volume: np.ndarray,
+    bins: int = 128,
+    default_low: float = 1.0,
+    default_high: float = 99.5,
+) -> HistogramStats:
+    finite = np.asarray(volume, dtype=np.float32)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return HistogramStats((0,), (0.0, 1.0), 0.0, 1.0, default_low, default_high)
+    minimum = float(np.min(finite))
+    maximum = float(np.max(finite))
+    if maximum <= minimum:
+        maximum = minimum + 1.0
+    counts, edges = np.histogram(finite, bins=bins, range=(minimum, maximum))
+    return HistogramStats(
+        tuple(int(value) for value in counts),
+        tuple(float(value) for value in edges),
+        minimum,
+        maximum,
+        default_low,
+        default_high,
+    )
+
+
+def histogram_percentile(
+    counts: tuple[int, ...],
+    edges: tuple[float, ...],
+    percentile: float,
+) -> float:
+    total = sum(counts)
+    if total <= 0 or len(edges) < 2:
+        return 0.0
+    target = max(0.0, min(100.0, percentile)) / 100.0 * total
+    cumulative = 0
+    for index, count in enumerate(counts):
+        next_cumulative = cumulative + count
+        if target <= next_cumulative:
+            if count <= 0:
+                return float(edges[index])
+            fraction = (target - cumulative) / count
+            return float(edges[index] + (edges[index + 1] - edges[index]) * fraction)
+        cumulative = next_cumulative
+    return float(edges[-1])
+
+
 def normalize_plane(
     plane: np.ndarray,
     brightness: float,
@@ -1093,7 +1390,6 @@ def composite_rgb(
             layer.clip.minimum,
             layer.clip.maximum,
         )
-        norm = np.clip(norm * layer.gain, 0.0, 1.0)
         color_rgb = np.array(hex_to_rgb(layer.color), dtype=np.float32) / 255.0
         contribution = norm[..., None] * color_rgb * alpha
         rgb = 1.0 - (1.0 - rgb) * (1.0 - contribution)
@@ -1135,18 +1431,26 @@ def clamp_int(value: int, minimum: int, maximum: int) -> int:
     return max(minimum, min(maximum, value))
 
 
-def parse_gain_overrides(raw_value: str) -> dict[str, float]:
-    gains: dict[str, float] = {}
+def parse_window_overrides(raw_value: str) -> dict[str, tuple[float, float]]:
+    windows: dict[str, tuple[float, float]] = {}
     for item in raw_value.split(","):
-        if not item or ":" not in item:
+        if not item:
             continue
-        layer_id, raw_gain = item.rsplit(":", 1)
+        parts = item.rsplit(":", 2)
+        if len(parts) != 3:
+            continue
+        layer_id, raw_low, raw_high = parts
         try:
-            gain = float(raw_gain)
+            low = float(raw_low)
+            high = float(raw_high)
         except ValueError:
             continue
-        gains[layer_id] = max(0.0, min(5.0, gain))
-    return gains
+        low = max(0.0, min(100.0, low))
+        high = max(0.0, min(100.0, high))
+        if high <= low:
+            continue
+        windows[layer_id] = (low, high)
+    return windows
 
 
 class ViewerHandler(BaseHTTPRequestHandler):
@@ -1166,6 +1470,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self.send_bytes(PAGE_HTML.encode("utf-8"), "text/html; charset=utf-8")
             elif parsed.path == "/api/metadata":
                 self.send_json(self.metadata_payload())
+            elif parsed.path == "/api/histogram":
+                self.handle_histogram(parse_qs(parsed.query))
             elif parsed.path == "/api/composite":
                 self.handle_composite(parse_qs(parsed.query))
             else:
@@ -1201,7 +1507,7 @@ class ViewerHandler(BaseHTTPRequestHandler):
         brightness = float(query_value(query, "brightness", "100"))
         contrast = float(query_value(query, "contrast", "100"))
         opacity = float(query_value(query, "opacity", "0.75"))
-        gains = parse_gain_overrides(query_value(query, "gains", ""))
+        windows = parse_window_overrides(query_value(query, "windows", ""))
         layer_ids = [
             layer_id
             for layer_id in query_value(query, "layers", "").split(",")
@@ -1211,13 +1517,16 @@ class ViewerHandler(BaseHTTPRequestHandler):
         volumes = []
         for layer_id in layer_ids:
             cached = self.store.get(layer_id)
+            clip = cached.clip
+            window = windows.get(layer_id)
+            if window is not None:
+                clip = self.store.get_histogram(layer_id).clip_for_percentiles(*window)
             layer = self.layer_by_id[layer_id]
             volumes.append(
                 CompositeLayer(
                     volume=cached.data,
                     color=layer.color,
-                    clip=cached.clip,
-                    gain=gains.get(layer_id, 1.0),
+                    clip=clip,
                 )
             )
         image = composite_rgb(
@@ -1230,6 +1539,13 @@ class ViewerHandler(BaseHTTPRequestHandler):
             reference_volume=self.store.get_reference(),
         )
         self.send_bytes(encode_png_rgb(image), "image/png", cache=True)
+
+    def handle_histogram(self, query: dict[str, list[str]]) -> None:
+        layer_id = query_value(query, "layer", "")
+        if layer_id not in self.layer_by_id:
+            self.send_error(HTTPStatus.NOT_FOUND, "Unknown layer")
+            return
+        self.send_json(self.store.get_histogram(layer_id).to_json())
 
     def send_json(self, payload: dict[str, Any]) -> None:
         self.send_bytes(

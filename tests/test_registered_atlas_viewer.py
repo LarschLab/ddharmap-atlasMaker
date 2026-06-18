@@ -11,10 +11,12 @@ from brain_atlas_viewer.app import (
     assign_marker_colors,
     composite_rgb,
     compute_clip_stats,
+    compute_histogram_stats,
     encode_png_rgb,
+    histogram_percentile,
     normalize_plane,
     orient_volume_for_display,
-    parse_gain_overrides,
+    parse_window_overrides,
     plane_slice,
 )
 
@@ -99,20 +101,31 @@ def test_composite_rgb_returns_uint8_rgb_image():
     assert image[:, :, 2].max() == 0
 
 
-def test_composite_rgb_applies_layer_clip_and_gain():
+def test_histogram_stats_return_binned_counts_and_percentile_values():
+    volume = np.arange(100, dtype=np.float32)
+
+    stats = compute_histogram_stats(volume, bins=10)
+
+    assert len(stats.counts) == 10
+    assert len(stats.edges) == 11
+    assert sum(stats.counts) == 100
+    assert 48 <= histogram_percentile(stats.counts, stats.edges, 50) <= 51
+
+
+def test_composite_rgb_applies_layer_clip_window():
     volume = np.zeros((1, 2, 3), dtype=np.float32)
     volume[:, :, 1] = 10
 
-    baseline = composite_rgb(
-        [CompositeLayer(volume, "#ff0000", ClipStats(0, 20), gain=1)],
+    wide = composite_rgb(
+        [CompositeLayer(volume, "#ff0000", ClipStats(0, 20))],
         "sagittal",
         1,
         brightness=100,
         contrast=100,
         opacity=1,
     )
-    boosted = composite_rgb(
-        [CompositeLayer(volume, "#ff0000", ClipStats(0, 20), gain=2)],
+    narrow = composite_rgb(
+        [CompositeLayer(volume, "#ff0000", ClipStats(0, 10))],
         "sagittal",
         1,
         brightness=100,
@@ -120,8 +133,8 @@ def test_composite_rgb_applies_layer_clip_and_gain():
         opacity=1,
     )
 
-    assert baseline[:, :, 0].max() == 127
-    assert boosted[:, :, 0].max() == 255
+    assert wide[:, :, 0].max() == 127
+    assert narrow[:, :, 0].max() == 255
 
 
 def test_composite_rgb_keeps_reference_visible_without_marker_layers():
@@ -145,10 +158,12 @@ def test_composite_rgb_keeps_reference_visible_without_marker_layers():
     np.testing.assert_array_equal(image[:, :, 1], image[:, :, 2])
 
 
-def test_parse_gain_overrides_clamps_and_skips_invalid_values():
-    gains = parse_gain_overrides("layer-a:2.5,layer-b:99,bad,layer-c:not-a-number")
+def test_parse_window_overrides_clamps_and_skips_invalid_values():
+    windows = parse_window_overrides(
+        "layer-a:2.5:98.5,layer-b:-1:101,bad,layer-c:4:not-a-number,layer-d:8:3"
+    )
 
-    assert gains == {"layer-a": 2.5, "layer-b": 5.0}
+    assert windows == {"layer-a": (2.5, 98.5), "layer-b": (0.0, 100.0)}
 
 
 def test_encode_png_rgb_writes_png_dimensions():
