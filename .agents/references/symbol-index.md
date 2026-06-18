@@ -8,42 +8,77 @@ Use this file when locating owner modules, editing public behavior, or updating 
 
 - `PROJECT_FILENAME`: canonical project JSON filename.
 - `DEFAULT_CROP_SIZE_PX`: default square crop size.
+- `SAME_FISH_CONFOCAL_PROFILE`: CLI/project identifier for constrained same-fish confocal exports.
+- `SAME_FISH_CONFOCAL_CROP_SIZE_PX`: enforced crop default for same-fish confocal launches.
 - `ChannelInfo`: channel index, gene, wavelength, label, and JSON serialization.
-- `StackFileState`: per-source review state, rotation, crop center, channel metadata, axes, and shape.
+- `SameFishConfocalProfile`: optional project export profile with fish ID, `rbest`/`rn` role, and explicit `rn` round number.
+- `StackFileState`: per-source review state, rotation, crop center, channel metadata, selected bridge channel, axes, shape, optional per-file output root, and optional per-file same-fish confocal profile.
 - `StackFileState.status`: file-list status authority.
-- `ProjectState`: output root, file list, interpolation/canvas/crop settings, JSON round trip.
+- `ProjectState`: output root, file list, interpolation/canvas/crop settings, optional project-level same-fish confocal profile, per-file override preservation, JSON round trip.
 - `ProjectState.add_or_update_file`: canonical path-based insert/update behavior.
 - `ProjectState.get_file`: canonical path-based lookup.
+- `ProjectState.remove_files`: canonical path-based removal behavior.
 - `ProjectState.save` / `ProjectState.load`: project persistence authority.
 
 ## `brain_atlas_preprocess/io.py`
 
 - `StackFormatError`: user-facing input contract failure.
 - `StackMetadata`: read-only source metadata and manifest serialization.
+- `ChannelMappingInference`: inferred channel labels plus confirmation messages.
 - `DEFAULT_TRANSFORM_WORKERS`: default CPU channel-transform worker count for exports.
 - `parse_gene_wavelength_pairs`: filename gene/wavelength parser.
-- `build_channel_mapping`: channel order and DAPI append authority.
+- `infer_channel_mapping`: LSM metadata channel-order inference and filename gene-label merge.
+- `build_channel_mapping`: legacy strict filename channel order and DAPI append authority.
+- `build_channel_mapping_suggestions`: prefilled labels for ambiguous/manual channel mapping.
+- `validate_channel_mapping`: full channel mapping validation for manual labels.
 - `read_lsm_metadata`: LSM metadata contract and axes validation.
 - `make_file_state`: bridge from source stack to project file state.
-- `load_dapi_mip`: DAPI preview maximum-intensity projection.
+- `load_channel_mip` / `load_channel_mips` / `load_labeled_channel_mip`: channel preview maximum-intensity projection.
+- `load_dapi_mip`: compatibility wrapper for DAPI preview maximum-intensity projection.
 - `rotate_stack_zyx`: ZYX rotation and dtype preservation.
 - `crop_square_zyx`: square crop and zero-padding behavior.
-- `export_preprocessed_channels`: canonical export pipeline, output names, NRRD writes, and manifest.
+- `export_preprocessed_channels`: canonical export pipeline, optional same-fish confocal output names, NRRD writes, and manifest.
 - `export_rotated_channels`: legacy compatibility wrapper for `export_preprocessed_channels`.
 
 ## `brain_atlas_preprocess/widgets.py`
 
-- `StackFileList`: list rendering and status color/text application.
+- `StackFileList`: list rendering, status color/text application, multi-selection, and stack drop/delete signals.
+- `ChannelThumbnail`: compact non-interactive channel preview for mapping dialogs.
 - `RotationPreview`: preview rendering, angle updates, crop overlay, and mouse interactions.
 - `_rotated_shape_yx`: pure geometry helper used by crop overlay and coordinate mapping.
 - `_array_to_pixmap`: preview intensity normalization and grayscale pixmap conversion.
 
 ## `brain_atlas_preprocess/app.py`
 
-- `PreviewWorker`: background DAPI preview loading wrapper.
+- `PreviewWorker`: background channel preview loading wrapper.
 - `PreprocessWorker`: background export wrapper.
 - `MainWindow`: UI composition and app workflow orchestration.
 - `main`: CLI entrypoint target from `pyproject.toml`.
+
+## `brain_atlas_viewer/app.py`
+
+- `MARKER_PALETTE`: viewer marker color cycle.
+- `Layer`: transformed-channel manifest row exposed to the viewer UI.
+- `ClipStats`: per-volume display clipping range.
+- `HistogramStats`: binned layer intensity histogram and raw intensity clip conversion.
+- `CompositeLayer`: volume/color/clip bundle for RGB compositing.
+- `VolumeStore`: lazy NRRD loader, LRU cache, and per-layer histogram cache for viewer layers.
+- `load_layers`: transformed-channel manifest loader.
+- `assign_marker_colors`: stable marker-to-color assignment.
+- `orient_volume_for_display`: Z-flip display orientation authority.
+- `plane_slice`: axial/sagittal/coronal slice and MIP extraction.
+- `compute_clip_stats`: stack percentile clipping helper.
+- `compute_histogram_stats`: full-stack histogram binning helper.
+- `histogram_percentile`: binned percentile-to-intensity conversion helper.
+- `normalize_plane`: brightness/contrast/clip normalization.
+- `composite_rgb`: reference-plus-marker RGB compositor.
+- `parse_window_overrides`: per-layer raw intensity display-window query parser.
+- `ViewerHandler`: HTTP request handler for page, metadata, histogram JSON, and composite PNGs.
+- `main`: CLI entrypoint target for `brain-atlas-viewer`.
+
+## `scripts/registered_atlas_viewer.py`
+
+- Compatibility launcher for `brain_atlas_viewer.app`; do not add viewer behavior here.
 
 ## Trusted implementation patterns
 

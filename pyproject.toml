@@ -27,9 +27,10 @@ bench = [
 
 [project.scripts]
 brain-atlas-preprocess = "brain_atlas_preprocess.app:main"
+brain-atlas-viewer = "brain_atlas_viewer.app:main"
 
 [tool.setuptools.packages.find]
-include = ["brain_atlas_preprocess*"]
+include = ["brain_atlas_preprocess*", "brain_atlas_viewer*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

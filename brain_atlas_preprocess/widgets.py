@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 import math
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from PySide6.QtCore import QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QListWidget, QListWidgetItem, QWidget
+from PySide6.QtWidgets import QAbstractItemView, QListWidget, QListWidgetItem, QWidget
 
 from .model import StackFileState
 
@@ -18,8 +19,22 @@ STATUS_COLORS = {
     "rotation_planned": QColor("#dce7ff"),
 }
 
+PREVIEW_LUTS = {
+    488: (0, 255, 0),
+    546: (255, 255, 0),
+    647: (255, 0, 0),
+}
+
 
 class StackFileList(QListWidget):
+    pathsDropped = Signal(list)
+    deletePressed = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+
     def set_files(self, files: list[StackFileState]) -> None:
         self.clear()
         for file_state in files:
@@ -45,6 +60,131 @@ class StackFileList(QListWidget):
         }[file_state.status]
         item.setText(f"{file_state.name}  [{suffix}]")
 
+    def selected_paths(self) -> list[str]:
+        return [
+            str(item.data(Qt.ItemDataRole.UserRole))
+            for item in self.selectedItems()
+        ]
+
+    def dragEnterEvent(self, event: Any) -> None:
+        if _dropped_local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragEnterEvent(event)
+
+    def dragMoveEvent(self, event: Any) -> None:
+        if _dropped_local_paths(event.mimeData()):
+            event.acceptProposedAction()
+            return
+        super().dragMoveEvent(event)
+
+    def dropEvent(self, event: Any) -> None:
+        paths = _dropped_local_paths(event.mimeData())
+        if not paths:
+            super().dropEvent(event)
+            return
+        self.pathsDropped.emit(paths)
+        event.acceptProposedAction()
+
+    def keyPressEvent(self, event: Any) -> None:
+        if event.key() in {Qt.Key.Key_Delete, Qt.Key.Key_Backspace}:
+            self.deletePressed.emit()
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
+
+def dropped_stack_paths(paths: list[str]) -> tuple[list[str], list[str]]:
+    stack_paths: list[str] = []
+    skipped: list[str] = []
+    for raw_path in paths:
+        path = Path(raw_path)
+        if path.is_dir():
+            children = sorted(path.iterdir())
+            lsm_children = [
+                str(child)
+                for child in children
+                if child.is_file() and child.suffix.lower() == ".lsm"
+            ]
+            if lsm_children:
+                stack_paths.extend(lsm_children)
+            else:
+                skipped.append(str(path))
+        elif path.is_file() and path.suffix.lower() == ".lsm":
+            stack_paths.append(str(path))
+        else:
+            skipped.append(str(path))
+    return stack_paths, skipped
+
+
+def _dropped_local_paths(mime_data: Any) -> list[str]:
+    if mime_data is None or not mime_data.hasUrls():
+        return []
+    paths: list[str] = []
+    for url in mime_data.urls():
+        if not url.isLocalFile():
+            continue
+        local_path = url.toLocalFile()
+        if local_path:
+            paths.append(local_path)
+    return paths
+
+
+class ChannelThumbnail(QWidget):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._image: np.ndarray | None = None
+        self._wavelength_nm: int | None = None
+        self._pixmap: QPixmap | None = None
+        self._message = "Preview unavailable"
+        self.setFixedSize(140, 110)
+
+    def set_image(
+        self, image: np.ndarray | None, wavelength_nm: int | None = None
+    ) -> None:
+        self._image = image
+        self._wavelength_nm = wavelength_nm
+        self._refresh_pixmap()
+        self.update()
+
+    def set_wavelength(self, wavelength_nm: int | None) -> None:
+        self._wavelength_nm = wavelength_nm
+        self._refresh_pixmap()
+        self.update()
+
+    def _refresh_pixmap(self) -> None:
+        self._pixmap = (
+            None
+            if self._image is None
+            else _array_to_pixmap(self._image, self._wavelength_nm)
+        )
+
+    def set_message(self, message: str) -> None:
+        self._message = message
+        self.update()
+
+    def paintEvent(self, event: Any) -> None:
+        painter = QPainter(self)
+        painter.fillRect(self.rect(), QColor("#15171a"))
+        if self._pixmap is None:
+            painter.setPen(QPen(QColor("#c8ced8")))
+            painter.drawText(
+                self.rect().adjusted(8, 8, -8, -8),
+                Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextWordWrap,
+                self._message,
+            )
+            return
+
+        available = self.rect().adjusted(4, 4, -4, -4)
+        scaled = self._pixmap.scaled(
+            available.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        target_x = available.center().x() - scaled.width() // 2
+        target_y = available.center().y() - scaled.height() // 2
+        painter.drawPixmap(target_x, target_y, scaled)
+
 
 class RotationPreview(QWidget):
     angleChanged = Signal(float)
@@ -61,8 +201,12 @@ class RotationPreview(QWidget):
         self.setMinimumSize(520, 520)
         self.setMouseTracking(True)
 
-    def set_image(self, image: np.ndarray | None) -> None:
-        self._pixmap = None if image is None else _array_to_pixmap(image)
+    def set_image(
+        self, image: np.ndarray | None, wavelength_nm: int | None = None
+    ) -> None:
+        self._pixmap = (
+            None if image is None else _array_to_pixmap(image, wavelength_nm)
+        )
         self.update()
 
     def set_angle(self, angle: float) -> None:
@@ -221,7 +365,17 @@ def _rotated_shape_yx(height: int, width: int, angle_degrees: float) -> tuple[in
     return max(1, rotated_height), max(1, rotated_width)
 
 
-def _array_to_pixmap(image: np.ndarray) -> QPixmap:
+def _array_to_pixmap(
+    image: np.ndarray, wavelength_nm: int | None = None
+) -> QPixmap:
+    normalized = _normalize_preview_image(image)
+    lut_color = PREVIEW_LUTS.get(wavelength_nm)
+    if lut_color is None:
+        return _grayscale_pixmap(normalized)
+    return _lut_pixmap(normalized, lut_color)
+
+
+def _normalize_preview_image(image: np.ndarray) -> np.ndarray:
     array = np.asarray(image)
     if array.ndim != 2:
         raise ValueError(f"Expected 2-D preview image, got {array.shape}.")
@@ -235,6 +389,10 @@ def _array_to_pixmap(image: np.ndarray) -> QPixmap:
     else:
         normalized = np.clip((finite - low) / (high - low), 0, 1)
         normalized = (normalized * 255).astype(np.uint8)
+    return normalized
+
+
+def _grayscale_pixmap(normalized: np.ndarray) -> QPixmap:
     height, width = normalized.shape
     contiguous = np.ascontiguousarray(normalized)
     image_qt = QImage(
@@ -243,5 +401,23 @@ def _array_to_pixmap(image: np.ndarray) -> QPixmap:
         height,
         contiguous.strides[0],
         QImage.Format.Format_Grayscale8,
+    ).copy()
+    return QPixmap.fromImage(image_qt)
+
+
+def _lut_pixmap(normalized: np.ndarray, color: tuple[int, int, int]) -> QPixmap:
+    height, width = normalized.shape
+    rgb = np.empty((height, width, 3), dtype=np.uint8)
+    for channel, value in enumerate(color):
+        rgb[:, :, channel] = ((normalized.astype(np.uint16) * value) // 255).astype(
+            np.uint8
+        )
+    contiguous = np.ascontiguousarray(rgb)
+    image_qt = QImage(
+        contiguous.data,
+        width,
+        height,
+        contiguous.strides[0],
+        QImage.Format.Format_RGB888,
     ).copy()
     return QPixmap.fromImage(image_qt)
