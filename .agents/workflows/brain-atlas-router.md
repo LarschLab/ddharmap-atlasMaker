@@ -15,6 +15,7 @@ Use this file when any task begins after loading `AGENTS.md` and `coding.md`.
 
 | Primary target or query content | Profile router |
 | --- | --- |
+| Registered atlas viewer, orthogonal slice viewer, transformed-channel manifest browsing, layer colors/gain, viewer HTTP server | `.agents/workflows/atlas-viewer-router.md` |
 | Desktop app behavior, PySide main window, workers, dialogs, project lifecycle | `.agents/workflows/preprocess-app-router.md` |
 | `.lsm` metadata, channel mapping, DAPI preview, rotation, crop, NRRD export, manifest | `.agents/workflows/preprocess-app-router.md` |
 | Project JSON schema, file status, crop defaults, saved state | `.agents/workflows/preprocess-app-router.md` |

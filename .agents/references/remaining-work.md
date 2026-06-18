@@ -7,6 +7,7 @@ Use this file when resuming unfinished work or recording a blocker.
 ## Trackers
 
 - Preprocess app workflow: `.agents/references/remaining-work-preprocess-app.md`
+- Atlas viewer workflow: `.agents/references/remaining-work-atlas-viewer.md`
 
 ## Tracking rule
 

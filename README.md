@@ -21,6 +21,12 @@ Launch the desktop app:
 brain-atlas-preprocess
 ```
 
+Launch the registered atlas viewer:
+
+```bash
+brain-atlas-viewer
+```
+
 For development and tests, install the test extras:
 
 ```bash
@@ -32,6 +38,16 @@ Benchmark tooling is optional:
 
 ```bash
 python -m pip install -e ".[bench]"
+```
+
+## Registered Atlas Viewer
+
+The atlas viewer is separate from the preprocessing app and lives in `brain_atlas_viewer/`.
+It serves registered NRRD channels from an `observed_channel_transform_manifest.csv`
+run directory as an orthogonal slice browser. The historical script path still works:
+
+```bash
+python scripts/registered_atlas_viewer.py
 ```
 
 ## Basic Workflow

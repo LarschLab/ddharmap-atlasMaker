@@ -55,6 +55,28 @@ Use this file when locating owner modules, editing public behavior, or updating 
 - `MainWindow`: UI composition and app workflow orchestration.
 - `main`: CLI entrypoint target from `pyproject.toml`.
 
+## `brain_atlas_viewer/app.py`
+
+- `MARKER_PALETTE`: viewer marker color cycle.
+- `Layer`: transformed-channel manifest row exposed to the viewer UI.
+- `ClipStats`: per-volume display clipping range.
+- `CompositeLayer`: volume/color/clip/gain bundle for RGB compositing.
+- `VolumeStore`: lazy NRRD loader and LRU cache for viewer layers.
+- `load_layers`: transformed-channel manifest loader.
+- `assign_marker_colors`: stable marker-to-color assignment.
+- `orient_volume_for_display`: Z-flip display orientation authority.
+- `plane_slice`: axial/sagittal/coronal slice and MIP extraction.
+- `compute_clip_stats`: stack percentile clipping helper.
+- `normalize_plane`: brightness/contrast/clip normalization.
+- `composite_rgb`: reference-plus-marker RGB compositor.
+- `parse_gain_overrides`: per-layer gain query parser.
+- `ViewerHandler`: HTTP request handler for page, metadata, and composite PNGs.
+- `main`: CLI entrypoint target for `brain-atlas-viewer`.
+
+## `scripts/registered_atlas_viewer.py`
+
+- Compatibility launcher for `brain_atlas_viewer.app`; do not add viewer behavior here.
+
 ## Trusted implementation patterns
 
 - Add reusable imaging or persistence logic to owner modules, then call from `app.py`.

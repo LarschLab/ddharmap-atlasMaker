@@ -1,0 +1,2 @@
+"""Registered brain atlas viewer."""
+

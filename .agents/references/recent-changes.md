@@ -7,6 +7,7 @@ Use this file when starting from handoff context or after completing meaningful 
 ## Logs
 
 - Preprocess app workflow: `.agents/references/recent-changes-preprocess-app.md`
+- Atlas viewer workflow: `.agents/references/recent-changes-atlas-viewer.md`
 
 ## Logging rule
 

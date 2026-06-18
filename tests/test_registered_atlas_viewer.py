@@ -4,13 +4,17 @@ import struct
 
 import numpy as np
 
-from scripts.registered_atlas_viewer import (
+from brain_atlas_viewer.app import (
+    ClipStats,
+    CompositeLayer,
     MARKER_PALETTE,
     assign_marker_colors,
     composite_rgb,
+    compute_clip_stats,
     encode_png_rgb,
     normalize_plane,
     orient_volume_for_display,
+    parse_gain_overrides,
     plane_slice,
 )
 
@@ -66,12 +70,21 @@ def test_normalize_plane_applies_clip_brightness_and_contrast():
     assert normalized[0, 2] == 1
 
 
+def test_compute_clip_stats_uses_stack_percentiles():
+    volume = np.arange(1001, dtype=np.float32)
+
+    stats = compute_clip_stats(volume)
+
+    assert stats.minimum == 10
+    assert stats.maximum == 995
+
+
 def test_composite_rgb_returns_uint8_rgb_image():
     volume = np.zeros((2, 3, 4), dtype=np.float32)
     volume[:, :, 2] = 255
 
     image = composite_rgb(
-        [(volume, "#ff0000")],
+        [CompositeLayer(volume, "#ff0000", ClipStats(0, 255))],
         "sagittal",
         2,
         brightness=100,
@@ -84,6 +97,31 @@ def test_composite_rgb_returns_uint8_rgb_image():
     assert image[:, :, 0].max() == 255
     assert image[:, :, 1].max() == 0
     assert image[:, :, 2].max() == 0
+
+
+def test_composite_rgb_applies_layer_clip_and_gain():
+    volume = np.zeros((1, 2, 3), dtype=np.float32)
+    volume[:, :, 1] = 10
+
+    baseline = composite_rgb(
+        [CompositeLayer(volume, "#ff0000", ClipStats(0, 20), gain=1)],
+        "sagittal",
+        1,
+        brightness=100,
+        contrast=100,
+        opacity=1,
+    )
+    boosted = composite_rgb(
+        [CompositeLayer(volume, "#ff0000", ClipStats(0, 20), gain=2)],
+        "sagittal",
+        1,
+        brightness=100,
+        contrast=100,
+        opacity=1,
+    )
+
+    assert baseline[:, :, 0].max() == 127
+    assert boosted[:, :, 0].max() == 255
 
 
 def test_composite_rgb_keeps_reference_visible_without_marker_layers():
@@ -105,6 +143,12 @@ def test_composite_rgb_keeps_reference_visible_without_marker_layers():
     assert image[:, :, 0].max() > 0
     np.testing.assert_array_equal(image[:, :, 0], image[:, :, 1])
     np.testing.assert_array_equal(image[:, :, 1], image[:, :, 2])
+
+
+def test_parse_gain_overrides_clamps_and_skips_invalid_values():
+    gains = parse_gain_overrides("layer-a:2.5,layer-b:99,bad,layer-c:not-a-number")
+
+    assert gains == {"layer-a": 2.5, "layer-b": 5.0}
 
 
 def test_encode_png_rgb_writes_png_dimensions():
