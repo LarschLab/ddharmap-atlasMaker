@@ -20,6 +20,21 @@ from urllib.parse import parse_qs, urlparse
 import nrrd
 import numpy as np
 
+from brain_atlas_viewer.masks import (
+    Contour,
+    MaskSession,
+    apply_lasso_to_slice,
+    apply_lasso_to_refined_slice,
+    extract_bilateral_refined_contours,
+    fill_holes_2d_by_slice,
+    fill_holes_3d,
+    generate_candidate_mask,
+    load_or_create_session,
+    refined_contours_to_mask,
+    remove_small_components_by_volume,
+    save_session,
+)
+
 
 DEFAULT_RUN_DIR = Path(
     "/Users/ddharmap/dataProcessing/brainMapping_registered/"
@@ -30,6 +45,7 @@ DEFAULT_REFERENCE_PATH = Path(
     "20260320_f01_cort_546_gad2_647_Stitch_preprocessed/"
     "20260320_f01_cort_546_gad2_647_Stitch_DAPI_740nm_preprocessed.nrrd"
 )
+DEFAULT_MASK_DIR = Path("/Users/ddharmap/dataProcessing/brainMapping_masks")
 MANIFEST_NAME = "observed_channel_transform_manifest.csv"
 MARKER_PALETTE = [
     "#00c853",
@@ -56,6 +72,14 @@ MARKER_PALETTE = [
     "#82b1ff",
     "#ffd740",
     "#ea80fc",
+]
+MASK_PALETTE = [
+    "#ff2d55",
+    "#00d1c1",
+    "#ffd740",
+    "#7f8cff",
+    "#64dd17",
+    "#ff7a1a",
 ]
 
 PAGE_HTML = """<!doctype html>
@@ -297,6 +321,86 @@ PAGE_HTML = """<!doctype html>
       min-height: 30px;
       padding: 4px 8px;
     }
+    .mask-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 76px;
+      gap: 8px;
+      align-items: center;
+      margin-bottom: 8px;
+      font-size: .86rem;
+    }
+    .mask-label {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .mask-row input[type="number"] {
+      width: 76px;
+      min-width: 0;
+    }
+    .mask-toggle-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin: 8px 0;
+    }
+    .mask-toggle-row label {
+      display: flex;
+      gap: 5px;
+      align-items: center;
+      color: #c8d8f4;
+      font-size: .82rem;
+    }
+    .mask-tool-row {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 6px;
+      margin: 8px 0;
+    }
+    button.active-tool {
+      background: #38598a;
+      border-color: #86b8ff;
+    }
+    .mask-morphology-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .mask-morphology-row input {
+      width: 100%;
+    }
+    .atlas-mask-row {
+      display: grid;
+      grid-template-columns: 18px minmax(0, 1fr) auto;
+      gap: 8px;
+      align-items: center;
+      min-height: 30px;
+      color: #c8d8f4;
+      font-size: .88rem;
+    }
+    .atlas-mask-row label {
+      display: contents;
+      cursor: pointer;
+    }
+    .atlas-mask-name {
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    textarea {
+      width: 100%;
+      min-height: 74px;
+      resize: vertical;
+      border: 1px solid #35435e;
+      background: #171d2a;
+      color: #f3f6fb;
+      border-radius: 7px;
+      padding: 7px 8px;
+      font: inherit;
+    }
     #slices {
       min-width: 0;
       min-height: 0;
@@ -398,7 +502,18 @@ const state = {
   userScaled: false,
   focusedPlane: "sagittal",
   query: "",
-  renderTimer: null
+  renderTimer: null,
+  mask: {enabled: false},
+  maskTool: "navigate",
+  maskEditMode: "add",
+  showRoi: true,
+  showCandidate: true,
+  showFinal: true,
+  showRefined: false,
+  maskRevision: 0,
+  lasso: null,
+  visibleMasks: new Set(),
+  planeRenderTokens: {}
 };
 
 const planeAxis = { sagittal: "x", coronal: "y", axial: "z" };
@@ -596,6 +711,8 @@ function appHtml() {
               <div id="layer-settings"></div>
             </div>
           </details>
+          ${atlasMaskPanelHtml()}
+          ${maskPanelHtml()}
           <details>
             <summary>Run</summary>
             <div class="panel meta" id="run-meta"></div>
@@ -618,6 +735,139 @@ function appHtml() {
         <span id="layer-status" class="grow"></span>
       </footer>
     </div>`;
+}
+
+function atlasMaskPanelHtml() {
+  const masks = state.metadata?.masks || [];
+  if (!masks.length) return "";
+  return `
+    <details open>
+      <summary>Atlas Masks</summary>
+      <div class="panel">
+        ${masks.map(mask => `
+          <div class="atlas-mask-row" title="${escapeHtml(mask.path)}">
+            <label>
+              <input class="atlas-mask-visible" data-mask="${escapeHtml(mask.id)}" type="checkbox" ${state.visibleMasks.has(mask.id) ? "checked" : ""}>
+              <span class="atlas-mask-name">${escapeHtml(mask.name)}</span>
+              <span class="swatch" style="background:${escapeHtml(mask.color)}"></span>
+            </label>
+          </div>
+        `).join("")}
+      </div>
+    </details>`;
+}
+
+function maskPanelHtml() {
+  if (!state.mask.enabled) return "";
+  const markerLayers = state.metadata.layers.filter(layer => state.mask.marker_layer_ids.includes(layer.id));
+  const thresholdRows = markerLayers.map(layer => {
+    const threshold = state.mask.thresholds[layer.id] ?? 0;
+    return `
+      <div class="mask-row">
+        <span class="mask-label" title="${escapeHtml(layer.registered_subject)} ${escapeHtml(layer.wavelength)}">${escapeHtml(layer.registered_subject)} ${escapeHtml(layer.wavelength)}</span>
+        <input class="mask-threshold" data-layer="${layer.id}" type="number" step="1" value="${threshold}">
+      </div>`;
+  }).join("");
+  const maxAgreement = Math.max(1, markerLayers.length);
+  const agreement = clamp(Number(state.mask.agreement_count || 1), 1, maxAgreement);
+  const warning = state.mask.warning ? `<div class="error" style="display:block;">${escapeHtml(state.mask.warning)}</div>` : "";
+  return `
+    <details open>
+      <summary>Mask</summary>
+      <div class="panel">
+        <div class="meta"><strong>${escapeHtml(state.mask.mask_name)}</strong> from exact marker <strong>${escapeHtml(state.mask.marker)}</strong></div>
+        ${warning}
+        <div class="mask-toggle-row">
+          <label><input id="show-roi" type="checkbox" ${state.showRoi ? "checked" : ""}>ROI</label>
+          <label><input id="show-candidate" type="checkbox" ${state.showCandidate ? "checked" : ""}>Candidate</label>
+          <label><input id="show-final" type="checkbox" ${state.showFinal ? "checked" : ""}>Final</label>
+          <label><input id="show-refined" type="checkbox" ${state.showRefined ? "checked" : ""}>Refined</label>
+        </div>
+        <div class="mask-tool-row">
+          <button id="mask-tool-nav" class="${state.maskTool === "navigate" ? "active-tool" : ""}">Navigate</button>
+          <button id="mask-tool-midline" class="${state.maskTool === "midline" ? "active-tool" : ""}">Set Midline</button>
+          <button id="mask-tool-roi" class="${state.maskTool === "roi" ? "active-tool" : ""}">ROI Lasso</button>
+          <button id="mask-tool-final" class="${state.maskTool === "final" ? "active-tool" : ""}">Final Lasso</button>
+          <button id="mask-tool-refined" class="${state.maskTool === "refined" ? "active-tool" : ""}">Refined Lasso</button>
+        </div>
+        <div class="button-grid">
+          <button id="mask-edit-add" class="${state.maskEditMode === "add" ? "active-tool" : ""}">Add</button>
+          <button id="mask-edit-subtract" class="${state.maskEditMode === "subtract" ? "active-tool" : ""}">Subtract</button>
+          <button id="mask-clear-slice">Clear ROI Slice</button>
+          <button id="mask-clear-all">Clear ROI All</button>
+        </div>
+        <div style="margin-top:10px;">
+          <div class="window-title">Stack thresholds</div>
+          <div class="meta">Raw intensity lower bounds.</div>
+          ${thresholdRows || `<div class="meta">No exact marker stacks found.</div>`}
+          <div class="mask-row">
+            <span>Agreement</span>
+            <input id="mask-agreement" type="number" min="1" max="${maxAgreement}" step="1" value="${agreement}">
+          </div>
+          <div class="meta">At least <span id="mask-agreement-readout">${agreement}</span> of ${maxAgreement} stack(s).</div>
+          <button id="mask-generate" style="width:100%; margin-top:8px;">Generate Candidate</button>
+        </div>
+        <div class="mask-morphology-row">
+          <button id="mask-fill-holes">Fill Holes</button>
+          <button id="mask-fill-holes-slice">Fill Holes Slice</button>
+          <button id="mask-remove-small">Remove Small</button>
+          <input id="mask-min-volume" type="number" min="0" step="100" value="1000" title="Minimum physical volume in um3">
+          <button id="mask-undo">Undo</button>
+        </div>
+        <div style="margin-top:10px;">
+          <div class="window-title">Refine contours</div>
+          <div class="mask-row">
+            <span>Midline x</span>
+            <input id="mask-midline-x" type="number" step="1" value="${state.mask.midline_x ?? Math.floor(state.metadata.dimensions.x / 2)}">
+          </div>
+          <div class="mask-row">
+            <span>Source</span>
+            <select id="refined-source">
+              <option value="candidate" ${state.mask.refinement?.source === "candidate" ? "selected" : ""}>Candidate</option>
+              <option value="final" ${state.mask.refinement?.source === "final" ? "selected" : ""}>Final</option>
+            </select>
+          </div>
+          <div class="mask-row">
+            <span>Min area px</span>
+            <input id="refined-min-area" type="number" min="1" step="10" value="${state.mask.refinement?.min_area_px ?? 150}">
+          </div>
+          <div class="mask-row">
+            <span>Min side fraction</span>
+            <input id="refined-min-fraction" type="number" min="0" max="1" step="0.05" value="${state.mask.refinement?.min_component_fraction ?? 0.25}">
+          </div>
+          <div class="mask-row">
+            <span>Smoothing px</span>
+            <input id="refined-smoothing" type="number" min="0" step="0.5" value="${state.mask.refinement?.smoothing_px ?? 2}">
+          </div>
+          <div class="mask-row">
+            <span>Simplify px</span>
+            <input id="refined-simplify" type="number" min="0" step="0.5" value="${state.mask.refinement?.simplify_px ?? 1}">
+          </div>
+          <div class="mask-row">
+            <span>Z smoothing</span>
+            <input id="refined-z-smoothing" type="number" min="0" step="0.25" value="${state.mask.refinement?.z_smoothing_slices ?? 0}">
+          </div>
+          <div class="button-grid">
+            <button id="refined-extract">Extract Smooth Contours</button>
+            <button id="refined-apply">Apply Refined</button>
+          </div>
+          <div class="meta">${refinedMetaHtml()}</div>
+        </div>
+        <div style="margin-top:10px;">
+          <div class="window-title">Rationale</div>
+          <textarea id="mask-rationale">${escapeHtml(state.mask.rationale || "")}</textarea>
+          <button id="mask-save" style="width:100%; margin-top:8px;">Save Mask${state.mask.dirty ? " *" : ""}</button>
+        </div>
+      </div>
+    </details>`;
+}
+
+function refinedMetaHtml() {
+  if (!state.mask.has_refined) return "No refined contours yet.";
+  const count = state.mask.refined_contours?.length ?? 0;
+  const inferred = (state.mask.refined_contours || []).filter(contour => contour.status === "inferred").length;
+  const applied = state.mask.refined_applied_to_final ? "applied" : "unapplied";
+  return `${count} refined contour(s), ${inferred} inferred, ${applied}.`;
 }
 
 function bindControls() {
@@ -659,12 +909,21 @@ function bindControls() {
   });
   for (const plane of planes) {
     const canvas = document.getElementById(`canvas-${plane}`);
-    canvas.addEventListener("mousedown", event => handleCanvasPointer(plane, event));
+    canvas.addEventListener("mousedown", event => {
+      if (maybeStartLasso(plane, event)) return;
+      handleCanvasPointer(plane, event);
+    });
     canvas.addEventListener("mousemove", event => {
+      if (state.lasso) {
+        continueLasso(plane, event);
+        return;
+      }
       if (event.buttons === 1) handleCanvasPointer(plane, event);
     });
     canvas.addEventListener("wheel", event => handleWheel(plane, event), {passive: false});
   }
+  bindMaskControls();
+  bindAtlasMaskControls();
   window.addEventListener("keydown", event => {
     if (event.target && ["INPUT", "TEXTAREA"].includes(event.target.tagName)) return;
     if (event.key === "+" || event.key === "=") {
@@ -681,6 +940,106 @@ function bindControls() {
       stepPlane(state.focusedPlane, delta);
     }
   });
+}
+
+function bindAtlasMaskControls() {
+  for (const input of document.querySelectorAll(".atlas-mask-visible")) {
+    input.addEventListener("change", event => {
+      const id = event.target.dataset.mask;
+      if (event.target.checked) state.visibleMasks.add(id);
+      else state.visibleMasks.delete(id);
+      renderImages();
+      updateStatus();
+    });
+  }
+}
+
+function bindMaskControls() {
+  if (!state.mask.enabled) return;
+  for (const [id, value] of [
+    ["show-roi", "showRoi"],
+    ["show-candidate", "showCandidate"],
+    ["show-final", "showFinal"],
+    ["show-refined", "showRefined"]
+  ]) {
+    document.getElementById(id).addEventListener("change", event => {
+      state[value] = event.target.checked;
+      renderImages();
+    });
+  }
+  for (const [id, tool] of [
+    ["mask-tool-nav", "navigate"],
+    ["mask-tool-midline", "midline"],
+    ["mask-tool-roi", "roi"],
+    ["mask-tool-final", "final"],
+    ["mask-tool-refined", "refined"]
+  ]) {
+    document.getElementById(id).addEventListener("click", () => {
+      state.maskTool = tool;
+      redrawApp();
+    });
+  }
+  document.getElementById("mask-edit-add").addEventListener("click", () => {
+    state.maskEditMode = "add";
+    redrawApp();
+  });
+  document.getElementById("mask-edit-subtract").addEventListener("click", () => {
+    state.maskEditMode = "subtract";
+    redrawApp();
+  });
+  document.getElementById("mask-clear-slice").addEventListener("click", async () => {
+    state.mask.contours = state.mask.contours.filter(contour => Number(contour.z) !== state.coord.z);
+    await postMaskContours();
+  });
+  document.getElementById("mask-clear-all").addEventListener("click", async () => {
+    state.mask.contours = [];
+    await postMaskContours();
+  });
+  for (const input of document.querySelectorAll(".mask-threshold")) {
+    input.addEventListener("input", event => {
+      state.mask.thresholds[event.target.dataset.layer] = Number(event.target.value);
+    });
+  }
+  document.getElementById("mask-agreement").addEventListener("input", event => {
+    const max = Math.max(1, state.mask.marker_layer_ids.length);
+    state.mask.agreement_count = clamp(Number(event.target.value), 1, max);
+    document.getElementById("mask-agreement-readout").textContent = String(state.mask.agreement_count);
+  });
+  document.getElementById("mask-midline-x").addEventListener("change", event => {
+    postMaskMidline(Number(event.target.value));
+  });
+  document.getElementById("mask-generate").addEventListener("click", generateMaskCandidate);
+  document.getElementById("mask-fill-holes").addEventListener("click", () => runMaskMorphology({operation: "fill_holes"}));
+  document.getElementById("mask-fill-holes-slice").addEventListener("click", () => runMaskMorphology({operation: "fill_holes_2d"}));
+  document.getElementById("mask-remove-small").addEventListener("click", () => {
+    runMaskMorphology({
+      operation: "remove_small_components",
+      minimum_um3: Number(document.getElementById("mask-min-volume").value)
+    });
+  });
+  document.getElementById("refined-extract").addEventListener("click", extractRefinedContours);
+  document.getElementById("refined-apply").addEventListener("click", applyRefinedContours);
+  document.getElementById("mask-undo").addEventListener("click", postMaskUndo);
+  document.getElementById("mask-rationale").addEventListener("input", event => {
+    state.mask.rationale = event.target.value;
+  });
+  document.getElementById("mask-save").addEventListener("click", saveMaskSession);
+}
+
+function redrawApp(options = {}) {
+  const previousMenu = document.getElementById("menu");
+  const menuScrollTop = options.preserveMenuScroll && previousMenu ? previousMenu.scrollTop : null;
+  document.getElementById("app").innerHTML = appHtml();
+  bindControls();
+  renderRunMeta();
+  renderLayerList();
+  setScale(state.scale);
+  renderImages();
+  updateStatus();
+  if (menuScrollTop !== null) {
+    const nextMenu = document.getElementById("menu");
+    if (nextMenu) nextMenu.scrollTop = menuScrollTop;
+  }
 }
 
 function renderLayerList() {
@@ -790,6 +1149,136 @@ async function fetchLayerHistogram(layerId) {
     state.pendingHistograms.delete(layerId);
   }
   if (state.selectedLayer === layerId) renderLayerSettings();
+}
+
+async function fetchMaskSession() {
+  const response = await fetch("/api/mask/session");
+  if (!response.ok) return {enabled: false};
+  return await response.json();
+}
+
+async function postJson(url, payload) {
+  const response = await fetch(url, {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify(payload || {})
+  });
+  if (!response.ok) throw new Error(`${url} failed: ${response.status}`);
+  return await response.json();
+}
+
+function updateMaskSession(payload) {
+  if (state.mask?.rationale && !payload.rationale) payload.rationale = state.mask.rationale;
+  state.mask = payload;
+  state.maskRevision += 1;
+  redrawApp({preserveMenuScroll: true});
+}
+
+async function postMaskContours() {
+  try {
+    updateMaskSession(await postJson("/api/mask/contours", {contours: state.mask.contours}));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function postMaskMidline(midlineX) {
+  try {
+    updateMaskSession(await postJson("/api/mask/midline", {midline_x: midlineX}));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function generateMaskCandidate() {
+  try {
+    updateMaskSession(await postJson("/api/mask/generate", {
+      thresholds: state.mask.thresholds,
+      agreement_count: state.mask.agreement_count
+    }));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+function refinedParams() {
+  return {
+    source: document.getElementById("refined-source").value,
+    midline_x: Number(document.getElementById("mask-midline-x").value),
+    min_area_px: Number(document.getElementById("refined-min-area").value),
+    min_component_fraction: Number(document.getElementById("refined-min-fraction").value),
+    smoothing_px: Number(document.getElementById("refined-smoothing").value),
+    simplify_px: Number(document.getElementById("refined-simplify").value),
+    symmetry_mode: "average",
+    z_smoothing_slices: Number(document.getElementById("refined-z-smoothing").value)
+  };
+}
+
+async function extractRefinedContours() {
+  try {
+    updateMaskSession(await postJson("/api/mask/refined/extract", refinedParams()));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function postRefinedEdit(points) {
+  try {
+    updateMaskSession(await postJson("/api/mask/refined/edit", {
+      ...refinedParams(),
+      z: state.coord.z,
+      points,
+      mode: state.maskEditMode
+    }));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function applyRefinedContours() {
+  try {
+    if (state.mask.has_final && !confirm("Replace the current final mask with refined contours?")) return;
+    updateMaskSession(await postJson("/api/mask/refined/apply", {}));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function postMaskEdit(points) {
+  try {
+    updateMaskSession(await postJson("/api/mask/edit", {
+      z: state.coord.z,
+      points,
+      mode: state.maskEditMode
+    }));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function runMaskMorphology(payload) {
+  try {
+    updateMaskSession(await postJson("/api/mask/morphology", payload));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function postMaskUndo() {
+  try {
+    updateMaskSession(await postJson("/api/mask/undo", {}));
+  } catch (error) {
+    showError(String(error));
+  }
+}
+
+async function saveMaskSession() {
+  try {
+    const rationale = document.getElementById("mask-rationale").value;
+    updateMaskSession(await postJson("/api/mask/save", {rationale}));
+  } catch (error) {
+    showError(String(error));
+  }
 }
 
 function histogramSvg(histogram, window, color) {
@@ -945,17 +1434,119 @@ function renderImages() {
 function loadPlane(plane) {
   const canvas = document.getElementById(`canvas-${plane}`);
   const ctx = canvas.getContext("2d");
+  const token = (state.planeRenderTokens[plane] || 0) + 1;
+  state.planeRenderTokens[plane] = token;
   const img = new Image();
   img.onload = () => {
+    if (state.planeRenderTokens[plane] !== token) return;
     canvas.width = img.naturalWidth;
     canvas.height = img.naturalHeight;
+    const size = planeDisplaySize(plane, img.naturalWidth, img.naturalHeight);
+    canvas.style.width = `${size.width}px`;
+    canvas.style.height = `${size.height}px`;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(img, 0, 0);
-    drawCrosshair(canvas, plane);
+    drawMaskOverlays(canvas, plane, token, () => {
+      if (state.planeRenderTokens[plane] === token) drawCrosshair(canvas, plane);
+    });
     if (!state.userScaled) setScale(fitScale());
   };
   img.onerror = () => showError(`Could not load ${plane} image.`);
   img.src = imageUrl(plane);
+}
+
+function drawMaskOverlays(canvas, plane, token, done) {
+  if (!state.mask.enabled || state.mip) {
+    drawAtlasMaskOverlays(canvas, plane, token, done);
+    return;
+  }
+  const editKinds = [];
+  if (state.showRoi) editKinds.push({url: maskOverlayUrl("roi", plane)});
+  if (state.showCandidate) editKinds.push({url: maskOverlayUrl("candidate", plane)});
+  if (state.showFinal) editKinds.push({url: maskOverlayUrl("final", plane)});
+  if (state.showRefined) editKinds.push({url: maskOverlayUrl("refined", plane)});
+  drawOverlayUrls(canvas, plane, token, editKinds, () => {
+    drawAtlasMaskOverlays(canvas, plane, token, done);
+  });
+}
+
+function drawAtlasMaskOverlays(canvas, plane, token, done) {
+  if (state.mip) {
+    done();
+    return;
+  }
+  const masks = (state.metadata.masks || [])
+    .filter(mask => state.visibleMasks.has(mask.id))
+    .map(mask => ({url: atlasMaskOverlayUrl(mask.id, plane)}));
+  drawOverlayUrls(canvas, plane, token, masks, done);
+}
+
+function drawOverlayUrls(canvas, plane, token, overlays, done) {
+  if (!overlays.length) {
+    done();
+    return;
+  }
+  const ctx = canvas.getContext("2d");
+  let pending = overlays.length;
+  for (const item of overlays) {
+    const overlay = new Image();
+    overlay.onload = () => {
+      if (state.planeRenderTokens[plane] !== token) return;
+      ctx.drawImage(overlay, 0, 0);
+      pending -= 1;
+      if (pending === 0) done();
+    };
+    overlay.onerror = () => {
+      if (state.planeRenderTokens[plane] !== token) return;
+      pending -= 1;
+      if (pending === 0) done();
+    };
+    overlay.src = item.url;
+  }
+}
+
+function maskOverlayUrl(kind, plane) {
+  const params = new URLSearchParams({
+    kind,
+    plane,
+    index: String(planeIndex(plane)),
+    rev: String(state.maskRevision)
+  });
+  return `/api/mask/overlay?${params.toString()}`;
+}
+
+function atlasMaskOverlayUrl(maskId, plane) {
+  const params = new URLSearchParams({
+    mask: maskId,
+    plane,
+    index: String(planeIndex(plane)),
+    rev: String(state.maskRevision)
+  });
+  return `/api/atlas-mask/overlay?${params.toString()}`;
+}
+
+function planeDisplaySize(plane, pixelWidth, pixelHeight) {
+  const [horizontalSpacing, verticalSpacing] = planeSpacings(plane);
+  const base = Math.max(1e-9, state.metadata.spacing.x || 1);
+  return {
+    width: Math.max(1, Math.round(pixelWidth * horizontalSpacing / base)),
+    height: Math.max(1, Math.round(pixelHeight * verticalSpacing / base))
+  };
+}
+
+function planeSpacings(plane) {
+  const spacing = state.metadata.spacing;
+  const base = Math.max(1e-9, spacing.x || 1);
+  let horizontalSpacing = spacing.x || base;
+  let verticalSpacing = spacing.y || base;
+  if (plane === "sagittal") {
+    horizontalSpacing = spacing.y || base;
+    verticalSpacing = spacing.z || base;
+  } else if (plane === "coronal") {
+    horizontalSpacing = spacing.x || base;
+    verticalSpacing = spacing.z || base;
+  }
+  return [horizontalSpacing, verticalSpacing];
 }
 
 function redrawCrosshairs() {
@@ -963,7 +1554,7 @@ function redrawCrosshairs() {
 }
 
 function drawCrosshair(canvas, plane) {
-  if (!state.crosshair || state.mip) return;
+  if (state.mip) return;
   const ctx = canvas.getContext("2d");
   const dims = state.metadata.dimensions;
   let x;
@@ -981,16 +1572,29 @@ function drawCrosshair(canvas, plane) {
   x = clamp(x, 0, canvas.width - 1);
   y = clamp(y, 0, canvas.height - 1);
   ctx.save();
-  ctx.strokeStyle = state.crosshairColor;
-  ctx.lineWidth = 1;
-  ctx.globalAlpha = 0.95;
-  ctx.beginPath();
-  ctx.moveTo(x + 0.5, 0);
-  ctx.lineTo(x + 0.5, canvas.height);
-  ctx.moveTo(0, y + 0.5);
-  ctx.lineTo(canvas.width, y + 0.5);
-  ctx.stroke();
-  const scalePx = Math.max(12, Math.round(100 / state.metadata.spacing.x));
+  if (state.crosshair) {
+    ctx.strokeStyle = state.crosshairColor;
+    ctx.lineWidth = 1;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, 0);
+    ctx.lineTo(x + 0.5, canvas.height);
+    ctx.moveTo(0, y + 0.5);
+    ctx.lineTo(canvas.width, y + 0.5);
+    ctx.stroke();
+  }
+  if (state.mask.enabled && plane === "axial" && state.mask.midline_x !== null && state.mask.midline_x !== undefined) {
+    const midlineX = clamp(Number(state.mask.midline_x), 0, canvas.width - 1);
+    ctx.strokeStyle = "#ffd740";
+    ctx.lineWidth = 2;
+    ctx.globalAlpha = 0.95;
+    ctx.beginPath();
+    ctx.moveTo(midlineX + 0.5, 0);
+    ctx.lineTo(midlineX + 0.5, canvas.height);
+    ctx.stroke();
+  }
+  const [horizontalSpacing] = planeSpacings(plane);
+  const scalePx = Math.max(12, Math.round(100 / horizontalSpacing));
   ctx.strokeStyle = "#f5f8ff";
   ctx.lineWidth = 2;
   ctx.beginPath();
@@ -1021,6 +1625,74 @@ function handleCanvasPointer(plane, event) {
   }
   renderImages();
   updateStatus();
+}
+
+function maybeStartLasso(plane, event) {
+  if (!state.mask.enabled || plane !== "axial" || state.maskTool === "navigate" || event.button !== 0) {
+    return false;
+  }
+  event.preventDefault();
+  state.focusedPlane = plane;
+  const point = canvasPoint(event.currentTarget, event);
+  if (state.maskTool === "midline") {
+    postMaskMidline(point.x);
+    return true;
+  }
+  state.lasso = {
+    plane,
+    points: [[point.x, point.y]]
+  };
+  window.addEventListener("mouseup", finishLasso, {once: true});
+  return true;
+}
+
+function continueLasso(plane, event) {
+  if (!state.lasso || plane !== state.lasso.plane) return;
+  const point = canvasPoint(event.currentTarget, event);
+  const points = state.lasso.points;
+  const last = points[points.length - 1];
+  if (!last || Math.abs(last[0] - point.x) + Math.abs(last[1] - point.y) >= 2) {
+    points.push([point.x, point.y]);
+    drawLassoPreview(event.currentTarget, points);
+  }
+}
+
+async function finishLasso(event) {
+  const lasso = state.lasso;
+  state.lasso = null;
+  if (!lasso || lasso.points.length < 3) {
+    renderImages();
+    return;
+  }
+  if (state.maskTool === "roi") {
+    state.mask.contours.push({z: state.coord.z, points: lasso.points});
+    await postMaskContours();
+  } else if (state.maskTool === "final") {
+    await postMaskEdit(lasso.points);
+  } else if (state.maskTool === "refined") {
+    await postRefinedEdit(lasso.points);
+  }
+}
+
+function canvasPoint(canvas, event) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: clamp(Math.round((event.clientX - rect.left) * canvas.width / rect.width), 0, canvas.width - 1),
+    y: clamp(Math.round((event.clientY - rect.top) * canvas.height / rect.height), 0, canvas.height - 1)
+  };
+}
+
+function drawLassoPreview(canvas, points) {
+  if (points.length < 2) return;
+  const ctx = canvas.getContext("2d");
+  ctx.save();
+  ctx.strokeStyle = state.maskTool === "roi" ? "#00d1c1" : (state.maskTool === "refined" ? "#7f8cff" : "#ff2d55");
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(points[0][0] + 0.5, points[0][1] + 0.5);
+  for (const point of points.slice(1)) ctx.lineTo(point[0] + 0.5, point[1] + 0.5);
+  ctx.stroke();
+  ctx.restore();
 }
 
 function handleWheel(plane, event) {
@@ -1070,6 +1742,7 @@ function resetView() {
   state.opacity = 75;
   state.windows = {};
   state.mip = false;
+  state.visibleMasks = new Set((state.metadata.masks || []).map(mask => mask.id));
   state.userScaled = false;
   document.getElementById("brightness").value = state.brightness;
   document.getElementById("contrast").value = state.contrast;
@@ -1090,6 +1763,7 @@ function shareView() {
     contrast: String(state.contrast),
     opacity: String(state.opacity),
     windows: windowParam(),
+    masks: Array.from(state.visibleMasks).join(","),
     mip: state.mip ? "1" : "0"
   });
   const url = `${window.location.origin}${window.location.pathname}?${params.toString()}`;
@@ -1107,8 +1781,12 @@ function updateStatus() {
   document.getElementById("focused-status").textContent =
     `${mode}; zoom ${state.scale.toFixed(2)}x`;
   const labels = activeLabels();
+  const maskLabels = (state.metadata.masks || [])
+    .filter(mask => state.visibleMasks.has(mask.id))
+    .map(mask => mask.name);
+  const maskText = maskLabels.length ? `; Masks: ${maskLabels.join(", ")}` : "";
   document.getElementById("layer-status").textContent =
-    labels.length ? `Reference: fixed DAPI; Layers: ${labels.join(", ")}${capText}` : "Reference: fixed DAPI";
+    labels.length ? `Reference: fixed DAPI; Layers: ${labels.join(", ")}${capText}${maskText}` : `Reference: fixed DAPI${maskText}`;
 }
 
 function showError(message) {
@@ -1145,10 +1823,23 @@ async function boot() {
   const params = new URLSearchParams(window.location.search);
   const hasLayerParam = params.has("layers");
   const requested = qs("layers", "");
-  const initial = hasLayerParam ? requested.split(",") : state.metadata.default_layers;
+  state.mask = await fetchMaskSession();
+  const maskParam = qs("masks", null);
+  state.visibleMasks = new Set(
+    maskParam === null
+      ? (state.metadata.masks || []).map(mask => mask.id)
+      : maskParam.split(",").filter(id => (state.metadata.masks || []).some(mask => mask.id === id))
+  );
+  const initial = hasLayerParam
+    ? requested.split(",")
+    : (state.mask.enabled ? state.mask.marker_layer_ids : state.metadata.default_layers);
   state.active = new Set(initial.filter(id => state.metadata.layers.some(layer => layer.id === id)));
   if (!state.active.size && !hasLayerParam && state.metadata.layers.length) state.active.add(state.metadata.layers[0].id);
   state.selectedLayer = state.active.values().next().value ?? (state.metadata.layers[0]?.id ?? null);
+  if (state.mask.enabled) {
+    state.selectedLayer = state.mask.marker_layer_ids[0] ?? state.selectedLayer;
+    state.showRefined = Boolean(state.mask.has_refined && !state.mask.refined_applied_to_final);
+  }
 
   document.getElementById("app").innerHTML = appHtml();
   bindControls();
@@ -1242,6 +1933,24 @@ class CachedVolume:
 
 
 @dataclass(frozen=True)
+class AtlasMask:
+    id: str
+    name: str
+    path: Path
+    color: str
+    marker: str | None = None
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "path": str(self.path),
+            "color": self.color,
+            "marker": self.marker,
+        }
+
+
+@dataclass(frozen=True)
 class CompositeLayer:
     volume: np.ndarray
     color: str
@@ -1309,6 +2018,42 @@ class VolumeStore:
         return orient_volume_for_display(np.asarray(data, dtype=np.float32))
 
 
+class AtlasMaskStore:
+    def __init__(
+        self,
+        masks: list[AtlasMask],
+        shape_zyx: tuple[int, int, int],
+        max_masks: int = 4,
+    ) -> None:
+        self._masks = {mask.id: mask for mask in masks}
+        self._shape_zyx = shape_zyx
+        self._max_masks = max(1, max_masks)
+        self._lock = threading.Lock()
+        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+
+    def get(self, mask_id: str) -> np.ndarray:
+        with self._lock:
+            cached = self._cache.get(mask_id)
+            if cached is not None:
+                self._cache.move_to_end(mask_id)
+                return cached
+            mask = self._masks[mask_id]
+            data, _header = nrrd.read(str(mask.path), index_order="C")
+            if data.ndim != 3:
+                raise ValueError(f"Expected 3-D mask NRRD for {mask.path}, got {data.shape}")
+            display_mask = orient_volume_for_display(np.asarray(data, dtype=np.uint8)) > 0
+            if display_mask.shape != self._shape_zyx:
+                raise ValueError(
+                    f"Mask {mask.path} shape {display_mask.shape} does not match viewer "
+                    f"shape {self._shape_zyx}"
+                )
+            self._cache[mask_id] = display_mask
+            self._cache.move_to_end(mask_id)
+            while len(self._cache) > self._max_masks:
+                self._cache.popitem(last=False)
+            return display_mask
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Serve a Danionella-style orthogonal slice viewer for registered NRRD channels."
@@ -1319,6 +2064,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8765)
     parser.add_argument("--max-cached-volumes", type=int, default=3)
     parser.add_argument("--max-layers-per-view", type=int, default=len(MARKER_PALETTE))
+    parser.add_argument("--mask-dir", type=Path, default=DEFAULT_MASK_DIR)
+    parser.add_argument("--mask-output-dir", type=Path)
+    parser.add_argument("--mask-name")
+    parser.add_argument("--mask-marker")
     return parser.parse_args()
 
 
@@ -1369,6 +2118,45 @@ def assign_marker_colors(markers: list[str]) -> dict[str, str]:
     for index, marker in enumerate(sorted(markers)):
         colors[marker] = MARKER_PALETTE[index % len(MARKER_PALETTE)]
     return colors
+
+
+def load_atlas_masks(mask_dir: Path | None, dimensions: dict[str, int]) -> list[AtlasMask]:
+    if mask_dir is None or not mask_dir.exists():
+        return []
+    masks: list[AtlasMask] = []
+    for index, path in enumerate(sorted(mask_dir.glob("*_mask.nrrd"))):
+        name = path.name.removesuffix("_mask.nrrd")
+        provenance_path = path.with_name(f"{name}_provenance.json")
+        marker = None
+        if provenance_path.exists():
+            try:
+                payload = json.loads(provenance_path.read_text())
+            except json.JSONDecodeError:
+                payload = {}
+            marker = None if payload.get("marker") in (None, "") else str(payload["marker"])
+            if isinstance(payload.get("dimensions"), dict):
+                payload_dimensions = {
+                    axis: int(payload["dimensions"][axis])
+                    for axis in ("x", "y", "z")
+                    if axis in payload["dimensions"]
+                }
+                if payload_dimensions and payload_dimensions != dimensions:
+                    continue
+        masks.append(
+            AtlasMask(
+                id=stable_mask_id(name),
+                name=name,
+                path=path,
+                color=MASK_PALETTE[index % len(MASK_PALETTE)],
+                marker=marker,
+            )
+        )
+    return masks
+
+
+def stable_mask_id(name: str) -> str:
+    token = re.sub(r"[^A-Za-z0-9_.-]+", "_", name).strip("_")
+    return token or "mask"
 
 
 def orient_volume_for_display(volume: np.ndarray) -> np.ndarray:
@@ -1548,6 +2336,19 @@ def encode_png_rgb(image: np.ndarray) -> bytes:
     return bytes(png)
 
 
+def encode_png_rgba(image: np.ndarray) -> bytes:
+    if image.ndim != 3 or image.shape[2] != 4:
+        raise ValueError(f"Expected HxWx4 RGBA image, got {image.shape}")
+    image = np.ascontiguousarray(image, dtype=np.uint8)
+    height, width, _channels = image.shape
+    raw = b"".join(b"\x00" + image[row].tobytes() for row in range(height))
+    png = bytearray(b"\x89PNG\r\n\x1a\n")
+    png.extend(png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)))
+    png.extend(png_chunk(b"IDAT", zlib.compress(raw, level=1)))
+    png.extend(png_chunk(b"IEND", b""))
+    return bytes(png)
+
+
 def png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
     crc = zlib.crc32(chunk_type)
     crc = zlib.crc32(payload, crc)
@@ -1583,15 +2384,76 @@ def parse_window_overrides(raw_value: str) -> dict[str, tuple[float, float]]:
     return windows
 
 
+def mask_overlay_png(
+    mask: np.ndarray,
+    plane: str,
+    index: int,
+    color: str,
+    alpha: int,
+) -> bytes:
+    slice_mask = np.asarray(plane_slice(mask.astype(np.uint8), plane, index), dtype=bool)
+    rgba = np.zeros((*slice_mask.shape, 4), dtype=np.uint8)
+    rgba[slice_mask, :3] = np.asarray(hex_to_rgb(color), dtype=np.uint8)
+    rgba[slice_mask, 3] = np.uint8(max(0, min(255, int(alpha))))
+    return encode_png_rgba(rgba)
+
+
+def refined_overlay_png(
+    session: MaskSession,
+    plane: str,
+    index: int,
+) -> bytes:
+    if not session.refined_contours:
+        mask = np.zeros(session.shape_zyx, dtype=bool)
+        return mask_overlay_png(mask, plane, index, "#7f8cff", 0)
+    observed = refined_contours_to_mask(
+        [
+            contour
+            for contour in session.refined_contours
+            if contour.status != "inferred"
+        ],
+        session.shape_zyx,
+    )
+    inferred = refined_contours_to_mask(
+        [
+            contour
+            for contour in session.refined_contours
+            if contour.status == "inferred"
+        ],
+        session.shape_zyx,
+    )
+    observed_slice = np.asarray(plane_slice(observed.astype(np.uint8), plane, index), dtype=bool)
+    inferred_slice = np.asarray(plane_slice(inferred.astype(np.uint8), plane, index), dtype=bool)
+    rgba = np.zeros((*observed_slice.shape, 4), dtype=np.uint8)
+    rgba[observed_slice, :3] = np.asarray(hex_to_rgb("#7f8cff"), dtype=np.uint8)
+    rgba[observed_slice, 3] = 120
+    rgba[inferred_slice, :3] = np.asarray(hex_to_rgb("#ffd740"), dtype=np.uint8)
+    rgba[inferred_slice, 3] = 92
+    return encode_png_rgba(rgba)
+
+
+def json_body(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    length = int(handler.headers.get("Content-Length", "0"))
+    if length <= 0:
+        return {}
+    return json.loads(handler.rfile.read(length).decode("utf-8"))
+
+
 class ViewerHandler(BaseHTTPRequestHandler):
     layers: list[Layer]
     layer_by_id: dict[str, Layer]
     store: VolumeStore
+    atlas_masks: list[AtlasMask]
+    atlas_mask_by_id: dict[str, AtlasMask]
+    atlas_mask_store: AtlasMaskStore
     run_dir: Path
     reference_path: Path
     dimensions: dict[str, int]
     spacing: dict[str, float]
     max_layers_per_view: int
+    mask_session: MaskSession | None
+    previous_final_mask: np.ndarray | None
+    previous_refined_state: tuple[list[Any], bool, dict[str, Any]] | None
 
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
@@ -1604,6 +2466,40 @@ class ViewerHandler(BaseHTTPRequestHandler):
                 self.handle_histogram(parse_qs(parsed.query))
             elif parsed.path == "/api/composite":
                 self.handle_composite(parse_qs(parsed.query))
+            elif parsed.path == "/api/mask/session":
+                self.handle_mask_session()
+            elif parsed.path == "/api/mask/overlay":
+                self.handle_mask_overlay(parse_qs(parsed.query))
+            elif parsed.path == "/api/atlas-mask/overlay":
+                self.handle_atlas_mask_overlay(parse_qs(parsed.query))
+            else:
+                self.send_error(HTTPStatus.NOT_FOUND, "Not found")
+        except Exception as exc:
+            self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    def do_POST(self) -> None:
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/mask/contours":
+                self.handle_mask_contours(json_body(self))
+            elif parsed.path == "/api/mask/midline":
+                self.handle_mask_midline(json_body(self))
+            elif parsed.path == "/api/mask/generate":
+                self.handle_mask_generate(json_body(self))
+            elif parsed.path == "/api/mask/edit":
+                self.handle_mask_edit(json_body(self))
+            elif parsed.path == "/api/mask/refined/extract":
+                self.handle_refined_extract(json_body(self))
+            elif parsed.path == "/api/mask/refined/edit":
+                self.handle_refined_edit(json_body(self))
+            elif parsed.path == "/api/mask/refined/apply":
+                self.handle_refined_apply()
+            elif parsed.path == "/api/mask/morphology":
+                self.handle_mask_morphology(json_body(self))
+            elif parsed.path == "/api/mask/undo":
+                self.handle_mask_undo()
+            elif parsed.path == "/api/mask/save":
+                self.handle_mask_save(json_body(self))
             else:
                 self.send_error(HTTPStatus.NOT_FOUND, "Not found")
         except Exception as exc:
@@ -1628,6 +2524,8 @@ class ViewerHandler(BaseHTTPRequestHandler):
             },
             "default_layers": default_layers(self.layers),
             "layers": [layer.to_json() for layer in self.layers],
+            "masks": [mask.to_json() for mask in self.atlas_masks],
+            "mask_editing": self.mask_session is not None,
         }
 
     def handle_composite(self, query: dict[str, list[str]]) -> None:
@@ -1677,6 +2575,252 @@ class ViewerHandler(BaseHTTPRequestHandler):
             return
         self.send_json(self.store.get_histogram(layer_id).to_json())
 
+    def handle_mask_session(self) -> None:
+        if self.mask_session is None:
+            self.send_json({"enabled": False})
+            return
+        self.send_json(self.mask_session.to_json())
+
+    def handle_mask_contours(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        contours = [
+            Contour.from_json(item)
+            for item in payload.get("contours", [])
+        ]
+        session.contours = contours
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_midline(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        session.midline_x = float(payload["midline_x"])
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_generate(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        thresholds = {
+            str(key): float(value)
+            for key, value in payload.get("thresholds", {}).items()
+            if str(key) in session.marker_layer_ids
+        }
+        agreement_count = int(payload.get("agreement_count", session.agreement_count))
+        session.thresholds = thresholds
+        session.agreement_count = max(1, min(max(1, len(session.marker_layer_ids)), agreement_count))
+        roi = session.roi_mask()
+        volumes = {
+            layer_id: self.store.get(layer_id).data
+            for layer_id in session.marker_layer_ids
+            if layer_id in thresholds
+        }
+        session.candidate_mask = generate_candidate_mask(
+            roi,
+            volumes,
+            thresholds,
+            session.agreement_count,
+        )
+        self.snapshot_mask_state(session)
+        session.final_mask = session.candidate_mask.copy()
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_edit(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        if session.final_mask is None:
+            session.final_mask = np.zeros(session.shape_zyx, dtype=bool)
+        z = int(payload["z"])
+        points = payload.get("points", [])
+        mode = str(payload.get("mode", "add"))
+        self.snapshot_mask_state(session)
+        roi_before = session.roi_mask()
+        session.final_mask = apply_lasso_to_slice(session.final_mask, z, points, mode)
+        if mode == "add" and np.any(session.final_mask & ~roi_before):
+            session.outside_roi_additions = True
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_morphology(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        if session.final_mask is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "No final mask to edit")
+            return
+        self.snapshot_mask_state(session)
+        operation = str(payload.get("operation", ""))
+        if operation == "fill_holes":
+            session.final_mask = fill_holes_3d(session.final_mask)
+        elif operation == "fill_holes_2d":
+            session.final_mask = fill_holes_2d_by_slice(session.final_mask)
+        elif operation == "remove_small_components":
+            session.final_mask = remove_small_components_by_volume(
+                session.final_mask,
+                session.spacing,
+                float(payload.get("minimum_um3", 0)),
+            )
+        else:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Unknown morphology operation")
+            return
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_refined_extract(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        source = str(payload.get("source", "candidate"))
+        source_mask = session.candidate_mask if source == "candidate" else session.final_mask
+        if source_mask is None or not np.any(source_mask):
+            self.send_error(HTTPStatus.BAD_REQUEST, f"No non-empty {source} mask")
+            return
+        self.snapshot_mask_state(session)
+        midline_x = float(payload.get("midline_x", session.midline_x or session.dimensions["x"] / 2))
+        refined_contours, metadata = extract_bilateral_refined_contours(
+            source_mask,
+            midline_x=midline_x,
+            min_area_px=int(payload.get("min_area_px", 150)),
+            min_component_fraction=float(payload.get("min_component_fraction", 0.25)),
+            smoothing_px=float(payload.get("smoothing_px", 2)),
+            simplify_px=float(payload.get("simplify_px", 1)),
+            symmetry_mode=str(payload.get("symmetry_mode", "average")),
+            z_smoothing_slices=float(payload.get("z_smoothing_slices", 0)),
+        )
+        session.midline_x = midline_x
+        session.refined_contours = refined_contours
+        session.refined_applied_to_final = False
+        session.refinement = {
+            **metadata,
+            "source": source,
+            "operation": "extract_bilateral_refined_contours",
+        }
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_refined_edit(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        if session.midline_x is None:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Set midline before refined edits")
+            return
+        self.snapshot_mask_state(session)
+        params = {
+            "midline_x": float(payload.get("midline_x", session.midline_x)),
+            "min_area_px": int(payload.get("min_area_px", session.refinement.get("min_area_px", 150))),
+            "min_component_fraction": float(payload.get("min_component_fraction", session.refinement.get("min_component_fraction", 0.25))),
+            "smoothing_px": float(payload.get("smoothing_px", session.refinement.get("smoothing_px", 2))),
+            "simplify_px": float(payload.get("simplify_px", session.refinement.get("simplify_px", 1))),
+            "symmetry_mode": str(payload.get("symmetry_mode", session.refinement.get("symmetry_mode", "average"))),
+        }
+        session.midline_x = params["midline_x"]
+        session.refined_contours = apply_lasso_to_refined_slice(
+            session.refined_contours,
+            session.shape_zyx,
+            int(payload["z"]),
+            payload.get("points", []),
+            str(payload.get("mode", "add")),
+            **params,
+        )
+        session.refined_applied_to_final = False
+        session.refinement = {
+            **session.refinement,
+            **params,
+            "operation": "refined_lasso_edit",
+        }
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_refined_apply(self) -> None:
+        session = self.require_mask_session()
+        if not session.refined_contours:
+            self.send_error(HTTPStatus.BAD_REQUEST, "No refined contours to apply")
+            return
+        self.snapshot_mask_state(session)
+        session.final_mask = refined_contours_to_mask(
+            session.refined_contours,
+            session.shape_zyx,
+        )
+        session.refined_applied_to_final = True
+        session.refinement = {
+            **session.refinement,
+            "applied_to_final": True,
+            "operation": "apply_refined_contours",
+        }
+        session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_undo(self) -> None:
+        session = self.require_mask_session()
+        if self.previous_final_mask is not None or self.previous_refined_state is not None:
+            if self.previous_final_mask is not None:
+                session.final_mask = self.previous_final_mask
+            if self.previous_refined_state is not None:
+                contours, applied, refinement = self.previous_refined_state
+                session.refined_contours = list(contours)
+                session.refined_applied_to_final = applied
+                session.refinement = dict(refinement)
+            self.previous_final_mask = None
+            self.previous_refined_state = None
+            session.dirty = True
+        self.send_json(session.to_json())
+
+    def handle_mask_save(self, payload: dict[str, Any]) -> None:
+        session = self.require_mask_session()
+        session.rationale = str(payload.get("rationale", session.rationale))
+        save_session(session)
+        self.send_json(session.to_json())
+
+    def handle_mask_overlay(self, query: dict[str, list[str]]) -> None:
+        session = self.require_mask_session()
+        plane = query_value(query, "plane", "axial")
+        index = int(query_value(query, "index", "0"))
+        kind = query_value(query, "kind", "final")
+        if kind == "roi":
+            mask = session.roi_mask()
+            color = "#00d1c1"
+            alpha = 82
+        elif kind == "candidate":
+            mask = session.candidate_mask
+            color = "#ffd740"
+            alpha = 96
+        elif kind == "final":
+            mask = session.final_mask
+            color = "#ff2d55"
+            alpha = 120
+        elif kind == "refined":
+            mask = None
+            color = "#7f8cff"
+            alpha = 120
+        else:
+            self.send_error(HTTPStatus.BAD_REQUEST, "Unknown overlay kind")
+            return
+        if mask is None:
+            mask = np.zeros(session.shape_zyx, dtype=bool)
+        if kind == "refined":
+            self.send_bytes(refined_overlay_png(session, plane, index), "image/png")
+        else:
+            self.send_bytes(mask_overlay_png(mask, plane, index, color, alpha), "image/png")
+
+    def handle_atlas_mask_overlay(self, query: dict[str, list[str]]) -> None:
+        mask_id = query_value(query, "mask", "")
+        mask = self.atlas_mask_by_id.get(mask_id)
+        if mask is None:
+            self.send_error(HTTPStatus.NOT_FOUND, "Unknown atlas mask")
+            return
+        plane = query_value(query, "plane", "axial")
+        index = int(query_value(query, "index", "0"))
+        volume = self.atlas_mask_store.get(mask.id)
+        self.send_bytes(mask_overlay_png(volume, plane, index, mask.color, 112), "image/png")
+
+    def snapshot_mask_state(self, session: MaskSession) -> None:
+        self.previous_final_mask = (
+            None if session.final_mask is None else session.final_mask.copy()
+        )
+        self.previous_refined_state = (
+            list(session.refined_contours),
+            bool(session.refined_applied_to_final),
+            dict(session.refinement),
+        )
+
+    def require_mask_session(self) -> MaskSession:
+        if self.mask_session is None:
+            raise ValueError("Mask editing is not enabled")
+        return self.mask_session
+
     def send_json(self, payload: dict[str, Any]) -> None:
         self.send_bytes(
             json.dumps(payload, separators=(",", ":")).encode("utf-8"),
@@ -1707,10 +2851,14 @@ def make_handler(
     reference_path: Path,
     layers: list[Layer],
     store: VolumeStore,
+    atlas_masks: list[AtlasMask],
+    atlas_mask_store: AtlasMaskStore,
     max_layers_per_view: int,
+    mask_session: MaskSession | None = None,
 ) -> type[ViewerHandler]:
     dimensions, spacing = read_volume_metadata(reference_path)
     layer_by_id = {layer.id: layer for layer in layers}
+    atlas_mask_by_id = {mask.id: mask for mask in atlas_masks}
 
     class ConfiguredViewerHandler(ViewerHandler):
         pass
@@ -1720,24 +2868,59 @@ def make_handler(
     ConfiguredViewerHandler.layers = layers
     ConfiguredViewerHandler.layer_by_id = layer_by_id
     ConfiguredViewerHandler.store = store
+    ConfiguredViewerHandler.atlas_masks = atlas_masks
+    ConfiguredViewerHandler.atlas_mask_by_id = atlas_mask_by_id
+    ConfiguredViewerHandler.atlas_mask_store = atlas_mask_store
     ConfiguredViewerHandler.dimensions = dimensions
     ConfiguredViewerHandler.spacing = spacing
     ConfiguredViewerHandler.max_layers_per_view = max_layers_per_view
+    ConfiguredViewerHandler.mask_session = mask_session
+    ConfiguredViewerHandler.previous_final_mask = None
+    ConfiguredViewerHandler.previous_refined_state = None
     return ConfiguredViewerHandler
 
 
 def main() -> None:
     args = parse_args()
+    mask_args = [args.mask_output_dir, args.mask_name, args.mask_marker]
+    if any(value is not None for value in mask_args) and not all(mask_args):
+        raise ValueError(
+            "--mask-output-dir, --mask-name, and --mask-marker are all required "
+            "to enable mask editing."
+        )
     if not args.reference_path.exists():
         raise FileNotFoundError(f"Missing reference DAPI NRRD: {args.reference_path}")
     layers = load_layers(args.run_dir)
     store = VolumeStore(layers, args.reference_path, args.max_cached_volumes)
+    dimensions, spacing = read_volume_metadata(args.reference_path)
+    atlas_masks = load_atlas_masks(args.mask_dir, dimensions)
+    atlas_mask_store = AtlasMaskStore(
+        atlas_masks,
+        (int(dimensions["z"]), int(dimensions["y"]), int(dimensions["x"])),
+    )
+    mask_session = None
+    if args.mask_output_dir and args.mask_name and args.mask_marker:
+        marker_layer_ids = [
+            layer.id for layer in layers if layer.marker == args.mask_marker
+        ]
+        mask_session = load_or_create_session(
+            args.mask_output_dir,
+            args.mask_name,
+            args.mask_marker,
+            dimensions,
+            spacing,
+            args.reference_path,
+            marker_layer_ids,
+        )
     handler = make_handler(
         args.run_dir,
         args.reference_path,
         layers,
         store,
+        atlas_masks,
+        atlas_mask_store,
         args.max_layers_per_view,
+        mask_session,
     )
     server = ThreadingHTTPServer((args.host, args.port), handler)
     url = f"http://{args.host}:{args.port}/"
@@ -1745,6 +2928,11 @@ def main() -> None:
     print(f"Run directory: {args.run_dir}")
     print(f"Reference DAPI: {args.reference_path}")
     print(f"Channels: {len(layers)}")
+    print(f"Atlas masks: {len(atlas_masks)}")
+    if mask_session is not None:
+        print(f"Mask editing: {mask_session.mask_name} ({mask_session.marker})")
+        if mask_session.marker_warning():
+            print(f"Mask warning: {mask_session.marker_warning()}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
