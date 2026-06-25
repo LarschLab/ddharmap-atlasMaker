@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import struct
 
+import nrrd
 import numpy as np
 
 from brain_atlas_viewer.app import (
+    AtlasMaskStore,
     ClipStats,
     CompositeLayer,
     MARKER_PALETTE,
@@ -14,10 +16,12 @@ from brain_atlas_viewer.app import (
     compute_histogram_stats,
     encode_png_rgb,
     histogram_percentile,
+    load_atlas_masks,
     normalize_plane,
     orient_volume_for_display,
     parse_window_overrides,
     plane_slice,
+    read_volume_metadata,
 )
 
 
@@ -48,6 +52,27 @@ def test_orient_volume_for_display_flips_z_axis():
 
     np.testing.assert_array_equal(oriented[0], volume[1])
     np.testing.assert_array_equal(oriented[1], volume[0])
+
+
+def test_read_volume_metadata_uses_header_xyz_sizes_and_spacing(tmp_path):
+    path = tmp_path / "sample.nrrd"
+    nrrd.write(
+        str(path),
+        np.zeros((3, 4, 5), dtype=np.uint8),
+        header={
+            "space directions": [
+                [0.5, 0.0, 0.0],
+                [0.0, 0.75, 0.0],
+                [0.0, 0.0, 2.0],
+            ],
+        },
+        index_order="C",
+    )
+
+    dimensions, spacing = read_volume_metadata(path)
+
+    assert dimensions == {"x": 5, "y": 4, "z": 3}
+    assert spacing == {"x": 0.5, "y": 0.75, "z": 2.0}
 
 
 def test_assign_marker_colors_uses_marker_palette_not_wavelengths():
@@ -179,6 +204,40 @@ def test_parse_window_overrides_preserves_raw_values_and_skips_invalid_values():
     )
 
     assert windows == {"layer-a": (2.5, 98.5), "layer-b": (-10.0, 4200.0)}
+
+
+def test_load_atlas_masks_uses_provenance_dimensions_and_marker(tmp_path):
+    mask_path = tmp_path / "dorsal_thalamus_mask.nrrd"
+    nrrd.write(str(mask_path), np.zeros((2, 3, 4), dtype=np.uint8), index_order="C")
+    mask_path.with_name("dorsal_thalamus_provenance.json").write_text(
+        '{"marker":"gbx2","dimensions":{"x":4,"y":3,"z":2}}\n'
+    )
+    mismatch_path = tmp_path / "wrong_grid_mask.nrrd"
+    nrrd.write(str(mismatch_path), np.zeros((1, 3, 4), dtype=np.uint8), index_order="C")
+    mismatch_path.with_name("wrong_grid_provenance.json").write_text(
+        '{"dimensions":{"x":4,"y":3,"z":1}}\n'
+    )
+
+    masks = load_atlas_masks(tmp_path, {"x": 4, "y": 3, "z": 2})
+
+    assert [mask.id for mask in masks] == ["dorsal_thalamus"]
+    assert masks[0].name == "dorsal_thalamus"
+    assert masks[0].marker == "gbx2"
+
+
+def test_atlas_mask_store_orients_disk_mask_for_display(tmp_path):
+    mask_path = tmp_path / "region_mask.nrrd"
+    disk = np.zeros((2, 3, 4), dtype=np.uint8)
+    disk[1, 1, 2] = 1
+    nrrd.write(str(mask_path), disk, index_order="C")
+    mask = load_atlas_masks(tmp_path, {"x": 4, "y": 3, "z": 2})[0]
+    store = AtlasMaskStore([mask], (2, 3, 4))
+
+    display = store.get(mask.id)
+
+    assert display.dtype == bool
+    assert display[0, 1, 2]
+    assert not display[1, 1, 2]
 
 
 def test_encode_png_rgb_writes_png_dimensions():
