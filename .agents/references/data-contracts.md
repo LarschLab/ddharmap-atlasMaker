@@ -16,6 +16,15 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Conflict-free metadata mappings are accepted automatically; filename/metadata conflicts or incomplete metadata require user confirmation.
 - Ambiguous stacks may be accepted with a user-provided full channel mapping.
 
+## NRRD input contract
+
+- Single-channel 3D `.nrrd` files (e.g. external averages/reference brains) are accepted as read-only sources and presented as one-channel `ZCYX` stacks with shape `(Z, 1, Y, X)`.
+- NRRDs are always read with `pynrrd` `index_order="C"` so arrays are `zyx`, matching FIJI/TIFF display; this was verified voxel-identical against a FIJI open/save round trip of an FIJI `Nrrd_Writer` file (big-endian, `sizes` = `x y z`).
+- Only axis-aligned positive `space directions` (or `spacings`) and no named `space` are accepted; oblique directions and RAS/LPS-named spaces are rejected so source and export share ITK's physical frame.
+- Source spacing and `space units` text are copied verbatim into exports (no meter round trip); NRRD sources without units get no `space units` in exports.
+- Channel identity comes from `channel_gene`/`channel_wavelength_nm` header fields, then a `DAPI` filename token (`DAPI`/740), then a single filename gene/wavelength pair; otherwise the channel dialog asks for confirmation.
+- Folder drops stay LSM-only; single NRRD files can be added via the dialog, drop, or CLI.
+
 ## Project state contract
 
 - Project state is written as `brain_atlas_preprocess_project.json` in the selected output root.
@@ -54,6 +63,8 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
 - NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.
 - NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` with `microns` space units when spacings are available.
+- Each export also writes `preprocess_transform_source_to_preprocessed.mat` (same-fish: `preprocess_transform_<round>_source_to_preprocessed.mat`), an ITK `AffineTransform_double_3_3` in MATLAB v4 format like ANTs `0GenericAffine.mat`. It maps preprocessed physical points to source physical points (ANTs `moving_to_fixed` naming): `-r <preprocessed> -i <source> -t <mat>` reproduces the export; `-r <source> -i <preprocessed> -t [<mat>,1]` maps back. Physical points use NRRD `space directions`, the source `space origin` if any, and no origin for exports.
+- Manifest carries `source_format` (`lsm`/`nrrd`) and a `transform` block (path, convention, `matrix_xyz_4x4`, `voxel_matrix_zyx_4x4`, units).
 - Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, selected bridge channel, QC image metadata (including the actual `qc_channel`), and output file list.
 
 ## Validation

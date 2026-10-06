@@ -124,3 +124,16 @@ def test_dropped_stack_paths_accepts_lsm_files_and_one_level_folders(tmp_path):
 
     assert stacks == [str(child), str(direct)]
     assert skipped == [str(ignored)]
+
+
+def test_dropped_stack_paths_accepts_nrrd_files_but_not_folder_nrrds(tmp_path):
+    direct = tmp_path / "DAPI_average_stack.nrrd"
+    direct.write_text("", encoding="utf-8")
+    folder = tmp_path / "exported_preprocessed"
+    folder.mkdir()
+    (folder / "x_DAPI_740nm_preprocessed.nrrd").write_text("", encoding="utf-8")
+
+    stacks, skipped = dropped_stack_paths([str(direct), str(folder)])
+
+    assert stacks == [str(direct)]
+    assert skipped == [str(folder)]

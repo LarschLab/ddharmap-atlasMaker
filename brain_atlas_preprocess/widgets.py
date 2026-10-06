@@ -110,7 +110,9 @@ def dropped_stack_paths(paths: list[str]) -> tuple[list[str], list[str]]:
                 stack_paths.extend(lsm_children)
             else:
                 skipped.append(str(path))
-        elif path.is_file() and path.suffix.lower() == ".lsm":
+        # Folder drops stay LSM-only so a dropped export folder does not
+        # re-add its own preprocessed NRRDs; single NRRD files are accepted.
+        elif path.is_file() and path.suffix.lower() in {".lsm", ".nrrd"}:
             stack_paths.append(str(path))
         else:
             skipped.append(str(path))

@@ -5,6 +5,7 @@ import zlib
 
 import numpy as np
 import pytest
+from scipy import ndimage
 
 from brain_atlas_preprocess.io import (
     StackFormatError,
@@ -20,8 +21,11 @@ from brain_atlas_preprocess.io import (
     load_labeled_channel_mip,
     make_file_state,
     parse_gene_wavelength_pairs,
+    preprocess_voxel_affine_zyx,
     preview_angle_to_export_angle,
     read_lsm_metadata,
+    read_nrrd_metadata,
+    read_stack_zcyx,
     read_unlabeled_lsm_metadata,
     rotate_stack_zyx,
     validate_channel_mapping,
@@ -1116,3 +1120,152 @@ def _read_grayscale_png(path: Path) -> np.ndarray:
         assert raw[start] == 0
         rows.append(np.frombuffer(raw[start + 1 : start + 1 + row_length], dtype=np.uint8))
     return np.vstack(rows)
+
+
+def _write_fiji_style_nrrd(path: Path, stack_zyx: np.ndarray, spacing_xyz) -> None:
+    """Write like FIJI Nrrd_Writer: x fastest, big-endian, no named space."""
+    import nrrd
+
+    nrrd.write(
+        str(path),
+        np.ascontiguousarray(stack_zyx.transpose(2, 1, 0)).astype(">u2"),
+        header={
+            "encoding": "raw",
+            "endian": "big",
+            "space dimension": 3,
+            "space directions": np.diag(spacing_xyz).tolist(),
+            "space units": ["microns", "microns", "microns"],
+        },
+        index_order="F",
+    )
+
+
+def _asymmetric_stack(shape_zyx=(3, 20, 30)) -> np.ndarray:
+    z, y, x = np.indices(shape_zyx)
+    return (z * 1000 + y * 30 + x).astype(np.uint16)
+
+
+def test_read_nrrd_metadata_reports_zcyx_and_preserves_geometry(tmp_path):
+    stack = _asymmetric_stack()
+    path = tmp_path / "DAPI_average_stack.nrrd"
+    _write_fiji_style_nrrd(path, stack, (1.0, 1.0, 2.0))
+
+    metadata = read_nrrd_metadata(path)
+
+    assert metadata.source_format == "nrrd"
+    assert metadata.axes == "ZCYX"
+    assert metadata.shape == (3, 1, 20, 30)
+    assert metadata.dtype == "uint16"
+    assert metadata.channels == [ChannelInfo(0, "DAPI", 740)]
+    assert metadata.space_spacing_xyz == (1.0, 1.0, 2.0)
+    assert metadata.space_units == ("microns", "microns", "microns")
+    assert metadata.voxel_size_z_m == pytest.approx(2e-6)
+    data = read_stack_zcyx(path)
+    assert data.shape == (3, 1, 20, 30)
+    assert data.dtype.isnative
+    np.testing.assert_array_equal(data[:, 0], stack)
+    mips = load_channel_mips(path)
+    np.testing.assert_array_equal(mips[0], stack.max(axis=0))
+
+
+def test_read_nrrd_metadata_requires_channel_confirmation_without_labels(tmp_path):
+    path = tmp_path / "average_stack.nrrd"
+    _write_fiji_style_nrrd(path, _asymmetric_stack(), (1.0, 1.0, 2.0))
+
+    with pytest.raises(StackFormatError, match="Confirm channel mapping"):
+        read_lsm_metadata(path)
+    unlabeled = read_unlabeled_lsm_metadata(path)
+    assert unlabeled.channel_mapping_requires_confirmation
+    labeled = make_file_state(path, channels=[ChannelInfo(0, "GCaMP", 488)])
+    assert labeled.shape == (3, 1, 20, 30)
+
+
+def test_read_nrrd_metadata_rejects_oblique_directions(tmp_path):
+    import nrrd
+
+    path = tmp_path / "DAPI_oblique.nrrd"
+    nrrd.write(
+        str(path),
+        np.zeros((4, 4, 2), dtype=np.uint8),
+        header={
+            "space dimension": 3,
+            "space directions": [[1, 0.5, 0], [0, 1, 0], [0, 0, 1]],
+        },
+    )
+    with pytest.raises(StackFormatError, match="axis-aligned"):
+        read_nrrd_metadata(path)
+
+
+def test_export_from_nrrd_preserves_units_and_writes_matching_transform(tmp_path):
+    import nrrd
+
+    rng = np.random.default_rng(0)
+    stack = ndimage_smooth(rng.integers(0, 4000, size=(2, 40, 50)).astype(np.uint16))
+    source = tmp_path / "DAPI_average_stack.nrrd"
+    _write_fiji_style_nrrd(source, stack, (0.5, 0.5, 2.0))
+    file_state = make_file_state(source)
+    file_state.rotation_degrees = 30.0
+    file_state.crop_center_yx = (30, 28)
+
+    output_dir = export_preprocessed_channels(
+        file_state, tmp_path / "out", crop_size_px=36, transform_workers=1
+    )
+
+    out_path = output_dir / "DAPI_average_stack_DAPI_740nm_preprocessed.nrrd"
+    exported, header = nrrd.read(str(out_path), index_order="C")
+    assert exported.shape == (2, 36, 36)
+    assert header["sizes"].tolist() == [36, 36, 2]
+    assert header["space units"] == ["microns", "microns", "microns"]
+    np.testing.assert_allclose(
+        header["space directions"], np.diag([0.5, 0.5, 2.0])
+    )
+    manifest = json.loads((output_dir / "preprocess_manifest.json").read_text())
+    assert manifest["source_format"] == "nrrd"
+    transform = manifest["transform"]
+    assert Path(transform["path"]).name == (
+        "preprocess_transform_source_to_preprocessed.mat"
+    )
+    assert transform["maps"] == "preprocessed_physical_to_source_physical"
+    from scipy.io import loadmat
+
+    itk = loadmat(transform["path"])
+    np.testing.assert_allclose(
+        itk["AffineTransform_double_3_3"].ravel(),
+        np.concatenate([
+            np.asarray(transform["matrix_xyz_4x4"])[:3, :3].ravel(),
+            np.asarray(transform["matrix_xyz_4x4"])[:3, 3],
+        ]),
+    )
+    np.testing.assert_array_equal(itk["fixed"].ravel(), [0, 0, 0])
+
+    # Resampling the source through the saved voxel map must reproduce the
+    # export, independent of the rotate/crop implementation.
+    voxel = np.asarray(transform["voxel_matrix_zyx_4x4"])
+    expected = ndimage.affine_transform(
+        stack.astype(float), voxel[:3, :3], voxel[:3, 3],
+        output_shape=exported.shape, order=1, mode="constant", cval=0,
+    )
+    interior = (slice(None), slice(6, 30), slice(6, 30))
+    np.testing.assert_allclose(
+        exported[interior], np.round(expected[interior]), atol=1
+    )
+    # Physical matrix = voxel map scaled by spacing (x/y swapped from zyx).
+    physical = np.asarray(transform["matrix_xyz_4x4"])
+    point_out_zyx = np.array([1.0, 10.0, 12.0])
+    point_src_zyx = voxel[:3, :3] @ point_out_zyx + voxel[:3, 3]
+    spacing_xyz = np.array([0.5, 0.5, 2.0])
+    out_phys = point_out_zyx[::-1] * spacing_xyz
+    np.testing.assert_allclose(
+        physical[:3, :3] @ out_phys + physical[:3, 3],
+        point_src_zyx[::-1] * spacing_xyz,
+    )
+
+
+def test_preprocess_voxel_affine_zero_rotation_is_crop_offset():
+    affine = preprocess_voxel_affine_zyx((2, 10, 12), 0.0, (5, 6), 4)
+    np.testing.assert_allclose(affine[:3, :3], np.eye(3))
+    np.testing.assert_allclose(affine[:3, 3], [0, 3, 4])
+
+
+def ndimage_smooth(stack: np.ndarray) -> np.ndarray:
+    return ndimage.gaussian_filter(stack.astype(float), (0, 2, 2)).astype(np.uint16)

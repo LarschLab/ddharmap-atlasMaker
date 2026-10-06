@@ -373,9 +373,9 @@ class MainWindow(QMainWindow):
     def _add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
             self,
-            "Select LSM stacks",
+            "Select LSM or NRRD stacks",
             str(Path.home()),
-            "LSM stacks (*.lsm);;All files (*)",
+            "Stacks (*.lsm *.nrrd);;LSM stacks (*.lsm);;NRRD stacks (*.nrrd);;All files (*)",
         )
         if not paths:
             return
@@ -760,7 +760,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Output root required", "Select an output root first.")
             return
         if not self.project.files:
-            QMessageBox.warning(self, "No stacks selected", "Add at least one LSM stack first.")
+            QMessageBox.warning(self, "No stacks selected", "Add at least one LSM or NRRD stack first.")
             return
         unreviewed = [file_state.name for file_state in self.project.files if not file_state.reviewed]
         if unreviewed:
@@ -861,7 +861,7 @@ def _format_error(exc: Exception) -> str:
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("input_stacks", nargs="*", help="LSM stacks to preload.")
+    parser.add_argument("input_stacks", nargs="*", help="LSM or NRRD stacks to preload.")
     parser.add_argument("--project", help="Project JSON to open at startup.")
     parser.add_argument("--output-root", help="Preprocessing output root.")
     parser.add_argument("--crop-size-px", type=int, help="Square crop size in pixels.")

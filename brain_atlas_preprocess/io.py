@@ -12,6 +12,7 @@ import zlib
 
 import numpy as np
 from scipy import ndimage
+from scipy.io import savemat
 import tifffile
 
 from .model import ChannelInfo, SameFishConfocalProfile, StackFileState
@@ -24,10 +25,22 @@ SUPPORTED_INTERPOLATION = {"nearest": 0, "linear": 1, "cubic": 3}
 DEFAULT_TRANSFORM_WORKERS = 4
 NRRD_SPACE_UNIT = "microns"
 INFERRED_WAVELENGTHS_NM = {488, 546, 647, DAPI_WAVELENGTH_NM}
+NRRD_SUFFIX = ".nrrd"
+NRRD_UNIT_TO_M = {
+    "microns": 1e-6,
+    "micron": 1e-6,
+    "um": 1e-6,
+    "\u00b5m": 1e-6,
+    "\u03bcm": 1e-6,
+    "mm": 1e-3,
+    "nm": 1e-9,
+    "m": 1.0,
+}
+ITK_AFFINE_TRANSFORM_TYPE = "AffineTransform_double_3_3"
 
 
 class StackFormatError(ValueError):
-    """Raised when an input stack does not match the expected LSM contract."""
+    """Raised when an input stack does not match the expected LSM/NRRD contract."""
 
 
 @dataclass(frozen=True)
@@ -42,10 +55,17 @@ class StackMetadata:
     voxel_size_z_m: float | None = None
     channel_mapping_requires_confirmation: bool = False
     channel_mapping_messages: tuple[str, ...] = ()
+    source_format: str = "lsm"
+    # NRRD sources keep their header spacing/unit text so exports can copy it
+    # verbatim instead of round-tripping through meters.
+    space_spacing_xyz: tuple[float, float, float] | None = None
+    space_units: tuple[str, str, str] | None = None
+    space_origin_xyz: tuple[float, float, float] | None = None
 
     def to_manifest_dict(self) -> dict[str, Any]:
         return {
             "source_path": self.path,
+            "source_format": self.source_format,
             "axes": self.axes,
             "shape": list(self.shape),
             "dtype": self.dtype,
@@ -292,6 +312,8 @@ def read_lsm_metadata(
     channels: list[ChannelInfo] | None = None,
 ) -> StackMetadata:
     source = Path(path)
+    if is_nrrd_path(source):
+        return read_nrrd_metadata(source, channels=channels, require_mapping=True)
     with tifffile.TiffFile(source) as tiff:
         if not tiff.is_lsm:
             raise StackFormatError(f"Expected a Zeiss LSM/TIFF file: {source}")
@@ -376,6 +398,12 @@ def load_channel_mips(
     requested_set = set(requested)
     if not requested_set:
         return {}
+    if is_nrrd_path(path):
+        data = read_stack_zcyx(path)
+        return {
+            channel_index: data[:, channel_index, :, :].max(axis=0)
+            for channel_index in requested
+        }
     mips: dict[int, np.ndarray] = {}
     with tifffile.TiffFile(path) as tiff:
         series = tiff.series[0]
@@ -420,6 +448,8 @@ def load_dapi_mip(path: str | Path) -> np.ndarray:
 
 def read_unlabeled_lsm_metadata(path: str | Path) -> StackMetadata:
     source = Path(path)
+    if is_nrrd_path(source):
+        return read_nrrd_metadata(source, require_mapping=False)
     with tifffile.TiffFile(source) as tiff:
         if not tiff.is_lsm:
             raise StackFormatError(f"Expected a Zeiss LSM/TIFF file: {source}")
@@ -448,6 +478,187 @@ def read_unlabeled_lsm_metadata(path: str | Path) -> StackMetadata:
             channel_mapping_requires_confirmation=inference.requires_confirmation,
             channel_mapping_messages=inference.messages,
         )
+
+
+def is_nrrd_path(path: str | Path) -> bool:
+    return Path(path).suffix.lower() == NRRD_SUFFIX
+
+
+def read_nrrd_metadata(
+    path: str | Path,
+    channels: list[ChannelInfo] | None = None,
+    *,
+    require_mapping: bool = True,
+) -> StackMetadata:
+    """Describe a single-channel 3D NRRD as a one-channel `ZCYX` stack.
+
+    pynrrd's default Fortran order returns the raw array as `xyz` (header
+    `sizes` order); C order returns the `zyx` layout used by FIJI/TIFF and by
+    the rest of this module, so headers are always read with `index_order="C"`.
+    """
+
+    import nrrd
+
+    source = Path(path)
+    header = nrrd.read_header(str(source))
+    dimension = int(header.get("dimension", 0))
+    if dimension != 3:
+        raise StackFormatError(
+            f"Expected a single-channel 3D NRRD, got dimension {dimension}: "
+            f"{source.name}"
+        )
+    size_x, size_y, size_z = (int(size) for size in header["sizes"])
+    spacing_xyz, units, origin_xyz = _nrrd_geometry(header, source)
+    unit_to_m = NRRD_UNIT_TO_M.get(units[0]) if units is not None else None
+    if units is not None and unit_to_m is None:
+        raise StackFormatError(
+            f"Unsupported NRRD space unit {units[0]!r}: {source.name}"
+        )
+    if spacing_xyz is not None and unit_to_m is None:
+        # Unitless spacing: keep spacing for the header copy but report no
+        # physical voxel size rather than guessing microns.
+        voxel_m: tuple[float | None, ...] = (None, None, None)
+    elif spacing_xyz is not None:
+        voxel_m = tuple(value * unit_to_m for value in spacing_xyz)
+    else:
+        voxel_m = (None, None, None)
+
+    if channels is not None:
+        channel_mapping = validate_channel_mapping(channels, 1)
+        requires_confirmation = False
+        messages: tuple[str, ...] = ()
+    else:
+        inference = _infer_nrrd_channel_mapping(source, header)
+        if require_mapping and inference.requires_confirmation:
+            detail = " ".join(inference.messages)
+            raise StackFormatError(
+                f"Confirm channel mapping for {source.name}."
+                + (f" {detail}" if detail else "")
+            )
+        channel_mapping = inference.channels
+        requires_confirmation = inference.requires_confirmation
+        messages = inference.messages
+    return StackMetadata(
+        path=str(source.expanduser().resolve()),
+        axes="ZCYX",
+        shape=(size_z, 1, size_y, size_x),
+        dtype=np.dtype(nrrd.reader._determine_datatype(header)).name,
+        channels=channel_mapping,
+        voxel_size_x_m=voxel_m[0],
+        voxel_size_y_m=voxel_m[1],
+        voxel_size_z_m=voxel_m[2],
+        channel_mapping_requires_confirmation=requires_confirmation,
+        channel_mapping_messages=messages,
+        source_format="nrrd",
+        space_spacing_xyz=spacing_xyz,
+        space_units=units,
+        space_origin_xyz=origin_xyz,
+    )
+
+
+def read_stack_zcyx(path: str | Path) -> np.ndarray:
+    source = Path(path)
+    if not is_nrrd_path(source):
+        with tifffile.TiffFile(source) as tiff:
+            return tiff.series[0].asarray()
+    import nrrd
+
+    data, _header = nrrd.read(str(source), index_order="C")
+    if data.ndim != 3:
+        raise StackFormatError(
+            f"Expected a single-channel 3D NRRD, got shape {data.shape}: "
+            f"{source.name}"
+        )
+    # Big-endian NRRDs (e.g. FIJI Nrrd_Writer) must be native for SciPy.
+    native = np.ascontiguousarray(data, dtype=data.dtype.newbyteorder("="))
+    return native[:, np.newaxis, :, :]
+
+
+def _nrrd_geometry(
+    header: dict[str, Any],
+    source: Path,
+) -> tuple[
+    tuple[float, float, float] | None,
+    tuple[str, str, str] | None,
+    tuple[float, float, float] | None,
+]:
+    spacing: tuple[float, float, float] | None = None
+    directions = header.get("space directions")
+    if directions is not None:
+        matrix = np.asarray(directions, dtype=float)
+        if matrix.shape != (3, 3) or not np.all(np.isfinite(matrix)):
+            raise StackFormatError(
+                f"Expected 3x3 NRRD space directions: {source.name}"
+            )
+        off_diagonal = matrix - np.diag(np.diag(matrix))
+        if np.any(np.abs(off_diagonal) > 1e-9) or np.any(np.diag(matrix) <= 0):
+            raise StackFormatError(
+                "Only axis-aligned NRRD space directions with positive "
+                f"spacing are supported: {source.name}"
+            )
+        spacing = tuple(float(value) for value in np.diag(matrix))
+    elif header.get("spacings") is not None:
+        values = [float(value) for value in header["spacings"]]
+        if len(values) == 3 and all(math.isfinite(v) and v > 0 for v in values):
+            spacing = (values[0], values[1], values[2])
+    space = header.get("space")
+    if space is not None:
+        # Exports never write a named space, so a RAS/LPS source would change
+        # ITK's physical frame between source and preprocessed stacks.
+        raise StackFormatError(
+            f"Unsupported NRRD named space {space!r}; expected `space dimension` "
+            f"only: {source.name}"
+        )
+    units_raw = header.get("space units") or header.get("units")
+    units: tuple[str, str, str] | None = None
+    if units_raw is not None:
+        units_list = [str(unit) for unit in units_raw]
+        if len(units_list) != 3 or len(set(units_list)) != 1:
+            raise StackFormatError(
+                f"Expected one shared NRRD space unit, got {units_list}: "
+                f"{source.name}"
+            )
+        units = (units_list[0], units_list[1], units_list[2])
+    origin_raw = header.get("space origin")
+    origin: tuple[float, float, float] | None = None
+    if origin_raw is not None:
+        values = [float(value) for value in origin_raw]
+        if len(values) == 3 and all(math.isfinite(value) for value in values):
+            origin = (values[0], values[1], values[2])
+    return spacing, units, origin
+
+
+def _infer_nrrd_channel_mapping(
+    source: Path,
+    header: dict[str, Any],
+) -> ChannelMappingInference:
+    gene = header.get("channel_gene")
+    wavelength = _optional_float(header.get("channel_wavelength_nm"))
+    if gene and wavelength:
+        return ChannelMappingInference(
+            channels=[ChannelInfo(index=0, gene=str(gene), wavelength_nm=int(wavelength))]
+        )
+    tokens = {token.lower() for token in re.split(r"[^A-Za-z0-9]+", source.stem)}
+    if DAPI_GENE.lower() in tokens:
+        return ChannelMappingInference(
+            channels=[
+                ChannelInfo(index=0, gene=DAPI_GENE, wavelength_nm=DAPI_WAVELENGTH_NM)
+            ]
+        )
+    try:
+        pairs = parse_gene_wavelength_pairs(source)
+    except StackFormatError:
+        pairs = {}
+    if len(pairs) == 1:
+        (pair_wavelength, pair_gene), = pairs.items()
+        return ChannelMappingInference(
+            channels=[ChannelInfo(index=0, gene=pair_gene, wavelength_nm=pair_wavelength)]
+        )
+    return ChannelMappingInference(
+        channels=build_channel_mapping_suggestions(source, 1),
+        requires_confirmation=True,
+        messages=("NRRD header and filename did not identify the channel.",),
+    )
 
 
 def rotate_stack_zyx(
@@ -556,8 +767,7 @@ def export_preprocessed_channels(
     output_dir = _export_output_dir(source, output_root, same_fish_confocal)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    with tifffile.TiffFile(source) as tiff:
-        data = tiff.series[0].asarray()
+    data = read_stack_zcyx(source)
 
     output_files: list[dict[str, Any]] = []
     qc: dict[str, Any] | None = None
@@ -610,6 +820,15 @@ def export_preprocessed_channels(
                 "applied_rotation_degrees": applied_rotation_degrees,
             }
 
+    transform = _write_preprocess_transform(
+        output_dir / _export_transform_filename(same_fish_confocal),
+        metadata,
+        applied_rotation_degrees,
+        file_state.crop_center_yx,
+        crop_size_px,
+        expand_canvas=expand_canvas,
+    )
+
     manifest = {
         **metadata.to_manifest_dict(),
         "rotation_degrees": file_state.rotation_degrees,
@@ -624,6 +843,7 @@ def export_preprocessed_channels(
         ),
         "bridge_channel": bridge_channel.to_dict(),
         "qc": qc,
+        "transform": transform,
         "output_files": output_files,
     }
     manifest_path = output_dir / _export_manifest_filename(same_fish_confocal)
@@ -685,6 +905,122 @@ def _export_qc_filename(
     if same_fish_confocal is None:
         return "preprocess_qc_dapi_mip.png"
     return f"preprocess_qc_{same_fish_confocal.round_label}_mip.png"
+
+
+def _export_transform_filename(
+    same_fish_confocal: SameFishConfocalProfile | None,
+) -> str:
+    if same_fish_confocal is None:
+        return "preprocess_transform_source_to_preprocessed.mat"
+    return (
+        f"preprocess_transform_{same_fish_confocal.round_label}"
+        "_source_to_preprocessed.mat"
+    )
+
+
+def preprocess_voxel_affine_zyx(
+    source_shape_zyx: tuple[int, int, int],
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    expand_canvas: bool = True,
+) -> np.ndarray:
+    """Return the 4x4 map from exported `zyx` voxel indices to source indices.
+
+    Mirrors `rotate_stack_zyx` (SciPy `ndimage.rotate` resampling, where an
+    output index maps to `rot @ out + offset` in the input) followed by
+    `crop_square_zyx`.
+    """
+
+    in_plane = np.asarray(source_shape_zyx[1:], dtype=float)
+    if math.isclose(applied_rotation_degrees, 0.0, abs_tol=1e-9):
+        rot = np.eye(2)
+        rotated_plane = in_plane.astype(int)
+    else:
+        radians = math.radians(applied_rotation_degrees)
+        c, s = math.cos(radians), math.sin(radians)
+        rot = np.array([[c, s], [-s, c]])
+        if expand_canvas:
+            iy, ix = in_plane
+            bounds = rot @ [[0, 0, iy, iy], [0, ix, 0, ix]]
+            rotated_plane = (np.ptp(bounds, axis=1) + 0.5).astype(int)
+        else:
+            rotated_plane = in_plane.astype(int)
+    offset = (in_plane - 1) / 2 - rot @ ((rotated_plane - 1) / 2)
+    if crop_center_yx is None:
+        center = rotated_plane // 2
+    else:
+        center = np.asarray(crop_center_yx, dtype=int)
+    crop_start = center - crop_size_px // 2
+
+    affine = np.eye(4)
+    affine[1:3, 1:3] = rot
+    affine[1:3, 3] = rot @ crop_start + offset
+    return affine
+
+
+def _write_preprocess_transform(
+    path: Path,
+    metadata: StackMetadata,
+    applied_rotation_degrees: float,
+    crop_center_yx: tuple[int, int] | None,
+    crop_size_px: int,
+    *,
+    expand_canvas: bool,
+) -> dict[str, Any] | None:
+    """Write the export geometry as an ITK affine `.mat` for ANTs.
+
+    Named in ANTs `moving_to_fixed` style: the file maps preprocessed
+    physical points to source physical points, so
+    `antsApplyTransforms -r <preprocessed> -i <source> -t <file>` reproduces
+    the export and `-r <source> -i <preprocessed> -t [<file>,1]` undoes it.
+    Physical points follow the NRRD headers: exports carry `space directions`
+    without `space origin`; sources may carry an origin.
+    """
+
+    spacing_xyz = _export_spacing_xyz(metadata)
+    if spacing_xyz is None:
+        return None
+    z, _c, y, x = metadata.shape
+    voxel_zyx = preprocess_voxel_affine_zyx(
+        (int(z), int(y), int(x)),
+        applied_rotation_degrees,
+        crop_center_yx,
+        crop_size_px,
+        expand_canvas=expand_canvas,
+    )
+    zyx_to_xyz = np.eye(4)[[2, 1, 0, 3]]
+    voxel_xyz = zyx_to_xyz @ voxel_zyx @ zyx_to_xyz.T
+    scale = np.diag([*spacing_xyz, 1.0])
+    source_origin = np.asarray(metadata.space_origin_xyz or (0.0, 0.0, 0.0))
+    physical = scale @ voxel_xyz @ np.linalg.inv(scale)
+    physical[:3, 3] += source_origin
+    # ITK MatlabTransformIO layout (as in ANTs `0GenericAffine.mat`): MATLAB
+    # v4 file with row-major matrix + translation and a zero rotation center.
+    # antspy only inverts linear transforms stored with a `.mat` suffix.
+    parameters = np.concatenate([physical[:3, :3].ravel(), physical[:3, 3]])
+    savemat(
+        str(path),
+        {
+            ITK_AFFINE_TRANSFORM_TYPE: parameters.reshape(12, 1),
+            "fixed": np.zeros((3, 1)),
+        },
+        format="4",
+    )
+    return {
+        "path": str(path),
+        "format": "itk_affine_mat",
+        "maps": "preprocessed_physical_to_source_physical",
+        "reproduce_export": "antsApplyTransforms -r <preprocessed> -i <source> -t <path>",
+        "map_to_source": "antsApplyTransforms -r <source> -i <preprocessed> -t [<path>,1]",
+        "space_units": (
+            list(units) if (units := _export_space_units(metadata)) else None
+        ),
+        "source_space_origin_xyz": list(source_origin),
+        "matrix_xyz_4x4": physical.tolist(),
+        "voxel_matrix_zyx_4x4": voxel_zyx.tolist(),
+    }
 
 
 def _transform_preprocessed_channels(
@@ -1043,11 +1379,13 @@ def _write_stack_nrrd(
         "crop_center_yx": json.dumps(list(crop_center_yx) if crop_center_yx else None),
         "labels": ["x", "y", "z"],
     }
-    space_directions_microns = _nrrd_space_directions_microns(metadata)
-    if space_directions_microns is not None:
+    spacing_xyz = _export_spacing_xyz(metadata)
+    if spacing_xyz is not None:
         header["space dimension"] = 3
-        header["space directions"] = space_directions_microns
-        header["space units"] = [NRRD_SPACE_UNIT, NRRD_SPACE_UNIT, NRRD_SPACE_UNIT]
+        header["space directions"] = np.diag(spacing_xyz).tolist()
+        units = _export_space_units(metadata)
+        if units is not None:
+            header["space units"] = list(units)
 
     # The in-memory stack is NumPy C-order ZYX. pynrrd defaults to Fortran
     # axis order, which writes a header external tools can interpret as XYZ.
@@ -1058,6 +1396,21 @@ def _write_stack_nrrd(
         index_order="C",
         compression_level=compression_level,
     )
+
+
+def _export_spacing_xyz(metadata: StackMetadata) -> tuple[float, float, float] | None:
+    if metadata.space_spacing_xyz is not None:
+        return metadata.space_spacing_xyz
+    directions = _nrrd_space_directions_microns(metadata)
+    if directions is None:
+        return None
+    return (directions[0][0], directions[1][1], directions[2][2])
+
+
+def _export_space_units(metadata: StackMetadata) -> tuple[str, str, str] | None:
+    if metadata.source_format == "nrrd":
+        return metadata.space_units
+    return (NRRD_SPACE_UNIT, NRRD_SPACE_UNIT, NRRD_SPACE_UNIT)
 
 
 def _nrrd_space_directions_microns(
