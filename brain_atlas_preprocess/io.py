@@ -548,6 +548,11 @@ def export_preprocessed_channels(
         bridge_index = _dapi_channel(metadata.channels).index
     export_channels = _profile_channels(metadata.channels, same_fish_confocal)
     bridge_channel = _channel_by_index(export_channels, bridge_index)
+    qc_channel = (
+        _channel_by_index(export_channels, 0)
+        if same_fish_confocal is not None
+        else bridge_channel
+    )
     output_dir = _export_output_dir(source, output_root, same_fish_confocal)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -594,12 +599,13 @@ def export_preprocessed_channels(
                 "shape": list(cropped.shape),
             }
         )
-        if channel.index == bridge_channel.index:
+        if channel.index == qc_channel.index:
             qc_path = output_dir / _export_qc_filename(same_fish_confocal)
             _write_stack_mip_png(qc_path, cropped)
             qc = {
                 "dapi_mip_path": str(qc_path),
                 "bridge_channel": bridge_channel.to_dict(),
+                "qc_channel": qc_channel.to_dict(),
                 "rotation_degrees": file_state.rotation_degrees,
                 "applied_rotation_degrees": applied_rotation_degrees,
             }

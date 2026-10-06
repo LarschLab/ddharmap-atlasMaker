@@ -50,11 +50,11 @@ Use this file before changing parsing, channel order, crop/rotation behavior, ou
 - Same-fish confocal profile exports to `<output_root>/rbest/` or `<output_root>/rn/` and writes `<fish_id>_<rbest|rN>_channel<index>_<gene>.nrrd`; when a stack has a per-file output root, that root is used for that stack.
 - Same-fish confocal profile normalizes channel index `0` to `GCaMP`; default app exports keep inferred/manual channel names.
 - Same-fish confocal manifests and QC images are suffixed by round label, e.g. `preprocess_manifest_rbest.json` and `preprocess_qc_r2_mip.png`.
-- QC image generation uses the per-stack selected bridge channel.
+- Same-fish confocal QC image generation always uses channel index `0` (canonical `GCaMP`), independent of the selected preview/bridge channel. Default-profile QC continues to use the selected bridge channel.
 - Exported channel arrays are processed in memory as `ZYX`, but NRRD files are written with `pynrrd` C-order so external tools interpret header sizes and spatial metadata as `XYZ`.
 - NRRD files use raw/uncompressed encoding by default to keep preprocessing runtime practical; gzip remains available only as an explicit writer option.
 - NRRD headers carry source path/name, source axes/shape/dtype, `array_axes`, channel metadata, preview rotation, applied export rotation, crop size, crop center, labels, and ITK-readable voxel `space directions` with `microns` space units when spacings are available.
-- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, selected bridge channel, QC image metadata, and output file list.
+- Manifest carries source metadata, rotation, interpolation, canvas mode, crop size, crop center, selected bridge channel, QC image metadata (including the actual `qc_channel`), and output file list.
 
 ## Validation
 

@@ -537,6 +537,7 @@ def test_export_preprocessed_channels_same_fish_confocal_profile(
         channels=channels,
     )
     data = np.arange(np.prod(metadata.shape), dtype=np.uint8).reshape(metadata.shape)
+    data[:, 2, :, :] = 7
 
     class FakeSeries:
         def asarray(self):
@@ -564,7 +565,7 @@ def test_export_preprocessed_channels_same_fish_confocal_profile(
             rotation_degrees=0.0,
             crop_center_yx=(1, 1),
             channels=channels,
-            bridge_channel_index=0,
+            bridge_channel_index=2,
         ),
         tmp_path / "02_reg" / "00_preprocessing",
         crop_size_px=2,
@@ -593,6 +594,11 @@ def test_export_preprocessed_channels_same_fish_confocal_profile(
     manifest = json.loads((output_dir / "preprocess_manifest_rbest.json").read_text())
     assert manifest["output_files"][0]["channel"]["gene"] == "GCaMP"
     assert Path(manifest["output_files"][0]["path"]).name.endswith("GCaMP.nrrd")
+    assert manifest["bridge_channel"]["gene"] == "pth2"
+    assert manifest["qc"]["bridge_channel"]["gene"] == "pth2"
+    assert manifest["qc"]["qc_channel"]["gene"] == "GCaMP"
+    qc_image = _read_grayscale_png(Path(manifest["qc"]["dapi_mip_path"]))
+    assert qc_image.max() > qc_image.min()
 
 
 def test_export_preprocessed_channels_same_fish_confocal_rn_names(
@@ -722,6 +728,7 @@ def test_export_preprocessed_channels_uses_selected_bridge_for_qc(
     manifest = json.loads((output_dir / "preprocess_manifest.json").read_text())
     assert manifest["bridge_channel"] == channels[0].to_dict()
     assert manifest["qc"]["bridge_channel"] == channels[0].to_dict()
+    assert manifest["qc"]["qc_channel"] == channels[0].to_dict()
     qc_image = _read_grayscale_png(Path(manifest["qc"]["dapi_mip_path"]))
     assert qc_image.max() > qc_image.min()
 

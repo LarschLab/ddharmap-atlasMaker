@@ -183,3 +183,11 @@ Passes completed: Reproduced the empty-list path from a nine-fish same-fish conf
 What changed: `MainWindow` now refreshes the stack list from a loaded `ProjectState` during construction and selects the first file when present, matching the existing Open Project button behavior.
 Rerun implications: Existing project JSON files remain compatible. Same-fish confocal batch projects launched with `--project` should now show preloaded stacks immediately.
 Validation performed: direct Qt offscreen smoke using `MainWindow(project=ProjectState(files=[...]))`, confirming list count `2` and first file selected. Full `pytest tests/test_app.py` was not run because the local brainAtlas `.venv` lacks `pytest`.
+
+## 2026-08-20 - same-fish QC pinned to GCaMP
+
+Slice goal: Keep same-fish confocal QC independent of whichever channel is active in the preprocessing viewer.
+Passes completed: Moved QC channel selection into the export writer, added manifest provenance for the actual QC channel, and added a regression with a non-GCaMP bridge channel.
+What changed: Same-fish confocal exports now always render `preprocess_qc_<round>_mip.png` from channel index `0`, canonically normalized to `GCaMP`. Default-profile exports continue to use the selected bridge channel. The QC manifest object now includes `qc_channel` while retaining `bridge_channel` for compatibility and preview provenance.
+Rerun implications: Existing QC PNGs are unchanged on disk; rerun preprocessing to regenerate them with the corrected GCaMP source.
+Validation performed: `pytest -q tests/test_io.py -k 'same_fish_confocal_profile or uses_selected_bridge_for_qc'`; `pytest -q tests/test_io.py`.
